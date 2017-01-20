@@ -36,6 +36,19 @@ typedef struct {
   uint64_t outputs[8]; /* Gate number of the respective output gates, or NO_GATE. */
 } state;
 
+typedef struct {
+  state *st;
+  const ttable target;
+  const ttable mask1;
+  const ttable mask2;
+  const int8_t *inbits;
+} create_circuit_params;
+
+typedef struct {
+  uint64_t ret1;
+  uint64_t ret2;
+} create_circuit_return;
+
 const uint8_t g_sbox_enc[] = {
     0x9c, 0xf2, 0x14, 0xc1, 0x8e, 0xcb, 0xb2, 0x65, 0x97, 0x7a, 0x60, 0x17, 0x92, 0xf9, 0x78, 0x41,
     0x07, 0x4c, 0x67, 0x6d, 0x66, 0x4a, 0x30, 0x7d, 0x53, 0x9d, 0xb5, 0xbc, 0xc3, 0xca, 0xf1, 0x04,
@@ -54,11 +67,9 @@ const uint8_t g_sbox_enc[] = {
     0xcd, 0x15, 0x21, 0x23, 0xd8, 0xb6, 0x0c, 0x3f, 0x54, 0x1a, 0xbf, 0x98, 0x48, 0x3a, 0x75, 0x77,
     0x2b, 0xae, 0x36, 0xda, 0x7e, 0x86, 0x35, 0x51, 0x05, 0x12, 0xb8, 0xa6, 0x9a, 0x2c, 0x06, 0x4b};
 
-pthread_mutex_t g_next_lock;
 pthread_mutex_t g_threadcount_lock;
-uint32_t g_next = 0;
-uint32_t g_threadcount = 0;
-state g_default_state;
+uint32_t g_threadcount = 1;
+uint32_t g_numproc = 0;
 ttable g_target[8];
 
 /* Prints a truth table to the console. Used for debugging. */
@@ -188,6 +199,24 @@ static inline void copy_state(state *dst, state *src) {
   dst->max_gates = src->max_gates;
   dst->num_gates = src->num_gates;
   memcpy(dst->outputs, src->outputs, sizeof(uint64_t) * 8);
+}
+
+static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
+    const int8_t *inbits);
+
+static void *create_circuit_thread(void *param) {
+  assert(param != NULL);
+  create_circuit_return *ret = (create_circuit_return*)malloc(sizeof(create_circuit_return));
+  assert(ret != NULL);
+  create_circuit_params ccp;
+  memcpy(&ccp, param, sizeof(create_circuit_params));
+  ret->ret1 = create_circuit(ccp.st, ccp.target, ccp.mask1, ccp.inbits);
+  if (ret->ret1 == NO_GATE) {
+    ret->ret2 = NO_GATE;
+    return (void*)ret;
+  }
+  ret->ret2 = create_circuit(ccp.st, ccp.target, ccp.mask2, ccp.inbits);
+  return (void*)ret;
 }
 
 static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
@@ -348,25 +377,27 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   /* 5. Use the specified input bit to select between two Karnaugh maps. Call this function
      recursively to generate those two maps. */
 
-  int8_t outbits[8];
+  /* Copy input bits already used to new array to avoid modifying the old one. */
+  int8_t next_inbits[8];
   uint8_t bitp = 0;
   while (bitp < 6 && inbits[bitp] != -1) {
-    outbits[bitp] = inbits[bitp];
+    next_inbits[bitp] = inbits[bitp];
     bitp += 1;
   }
   assert(bitp < 6);
-  outbits[bitp] = -1;
-  outbits[bitp + 1] = -1;
+  next_inbits[bitp] = -1;
+  next_inbits[bitp + 1] = -1;
 
-  state b1, n1, n2;
-  state *best = &b1; //(state*)malloc(sizeof(state));
-  state *nst1 = &n1; //(state*)malloc(sizeof(state));
-  state *nst2 = &n2; //(state*)malloc(sizeof(state));
+  state *best = (state*)malloc(sizeof(state)); /* Best state so far. */
+  state *nst1 = (state*)malloc(sizeof(state)); /* New state 1 */
+  state *nst2 = (state*)malloc(sizeof(state)); /* New state 2 */
   assert(best != NULL);
   assert(nst1 != NULL);
   assert(nst2 != NULL);
   best->num_gates = 0;
   for (int8_t bit = 0; bit < 8; bit++) {
+
+    /* Check if the current bit number has already been used for selection. */
     bool skip = false;
     for (uint8_t i = 0; i < bitp; i++) {
       if (inbits[i] == bit) {
@@ -380,25 +411,60 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
 
     copy_state(nst1, st);
     copy_state(nst2, st);
-    outbits[bitp] = bit;
+    next_inbits[bitp] = bit;
 
     ttable fsel = st->gates[bit].table;
     ttable maskb = mask & ~fsel;
     ttable maskc = mask & fsel;
 
-    uint64_t fb1 = create_circuit(nst1, target, maskb, outbits);
-    uint64_t fc1 = NO_GATE;
-    if (fb1 != NO_GATE) {
-      fc1 = create_circuit(nst1, target, maskc, outbits);
+    pthread_t threadid;
+    bool separate_thread = false;
+    create_circuit_params *ccp = NULL;
+    pthread_mutex_lock(&g_threadcount_lock);
+    if (g_threadcount < g_numproc) {
+      separate_thread = true;
+      ccp = (create_circuit_params*)malloc(sizeof(create_circuit_params));
+      assert(ccp != NULL);
+      create_circuit_params tccp = {nst1, target, maskb, maskc, next_inbits};
+      memcpy(ccp, &tccp, sizeof(create_circuit_params));
+      pthread_create(&threadid, NULL, create_circuit_thread, ccp);
+      g_threadcount += 1;
     }
-    uint64_t fc2 = create_circuit(nst2, target, maskc, outbits);
+    pthread_mutex_unlock(&g_threadcount_lock);
+
+    uint64_t fb1 = NO_GATE;
+    uint64_t fc1 = NO_GATE;
+    if (!separate_thread) {
+      fb1 = create_circuit(nst1, target, maskb, next_inbits);
+      if (fb1 != NO_GATE) {
+        fc1 = create_circuit(nst1, target, maskc, next_inbits);
+      }
+    }
+
+    uint64_t fc2 = create_circuit(nst2, target, maskc, next_inbits);
     uint64_t fb2 = NO_GATE;
     if (fc2 != NO_GATE) {
-      fb2 = create_circuit(nst2, target, maskb, outbits);
+      fb2 = create_circuit(nst2, target, maskb, next_inbits);
     }
+
+    if (separate_thread) {
+      create_circuit_return *ret = NULL;
+      pthread_join(threadid, (void**)&ret);
+      fb1 = ret->ret1;
+      fc1 = ret->ret2;
+      free(ret);
+      free(ccp);
+      ccp = NULL;
+      ret = NULL;
+      pthread_mutex_lock(&g_threadcount_lock);
+      g_threadcount -= 1;
+      pthread_mutex_unlock(&g_threadcount_lock);
+    }
+
     if (fc1 == NO_GATE && fb2 == NO_GATE) {
       continue;
     }
+
     uint64_t fb, fc;
     state *nst;
     if (fc1 < fb2) {
@@ -419,15 +485,15 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       copy_state(best, nst);
     }
   }
-  //free(nst1);
-  //free(nst2);
+  free(nst1);
+  free(nst2);
   if (best->num_gates == 0) {
-    //free(best);
+    free(best);
     return NO_GATE;
   }
   copy_state(st, best);
   uint64_t ret = best->num_gates - 1;
-  //free(best);
+  free(best);
   return ret;
 }
 
@@ -495,22 +561,6 @@ void print_digraph(state st) {
   printf("}\n");
 }
 
-bool get_next(state *st, uint8_t *output) {
-  pthread_mutex_lock(&g_next_lock);
-  while (g_default_state.outputs[g_next] != NO_GATE && g_next < 8) {
-    g_next++;
-  }
-  if (g_next >= 8) {
-    pthread_mutex_unlock(&g_next_lock);
-    return false;
-  }
-  *st = g_default_state;
-  *output = g_next++;
-  pthread_mutex_unlock(&g_next_lock);
-  printf("Next output: %d\n", *output);
-  return true;
-}
-
 static void save_state(const char *name, state st) {
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
@@ -523,17 +573,68 @@ static void save_state(const char *name, state st) {
   fclose(fp);
 }
 
-static void *circuit_thread(void *param) {
-  (void)(param);
-  pthread_mutex_lock(&g_threadcount_lock);
-  g_threadcount++;
-  pthread_mutex_unlock(&g_threadcount_lock);
-  state st;
-  uint8_t output;
+int main(int argc, char **argv) {
+
+  /* Initialize mutex. */
+  if (pthread_mutex_init(&g_threadcount_lock, NULL) != 0) {
+    fprintf(stderr, "Error initializing mutexes.\n");
+    return 1;
+  }
+
+  /* Generate truth tables for all output bits of the target sbox. */
+  for (uint8_t i = 0; i < 8; i++) {
+    g_target[i] = generate_target(i, true);
+  }
+
+  state default_state;
+
+  if (argc == 1) {
+    printf("No command line arguments - generating 1 output circuits.\n");
+    /* Generate the eight input bits. */
+    default_state.max_gates = MAX_GATES;
+    default_state.num_gates = 8;
+    for (uint8_t i = 0; i < 8; i++) {
+      default_state.gates[i].type = IN;
+      default_state.gates[i].table = generate_target(i, false);
+      default_state.gates[i].in1 = NO_GATE;
+      default_state.gates[i].in2 = NO_GATE;
+      default_state.outputs[i] = NO_GATE;
+    }
+  } else if (argc == 2 || (argc == 3 && strcmp(argv[1], "-dot") == 0)) {
+    FILE *fp = fopen(argv[argc - 1], "r");
+    if (fp == NULL) {
+      printf("Error opening file: %s\n", argv[argc - 1]);
+      return 1;
+    }
+    if (fread(&default_state, sizeof(state), 1, fp) != 1) {
+      printf("Error reading file: %s\n", argv[argc - 1]);
+      fclose(fp);
+      return 1;
+    }
+    fclose(fp);
+    if (argc == 3) {
+      print_digraph(default_state);
+      return 0;
+    }
+    printf("Loaded state from %s\n", argv[1]);
+    default_state.max_gates = MAX_GATES;
+  } else {
+    printf("Illegal arguments. Exiting!\n");
+    return 1;
+  }
+
+  g_numproc = sysconf(_SC_NPROCESSORS_ONLN);
+  printf("%" PRIu32 " processors online.\n", g_numproc);
+
   const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-  while (get_next(&st, &output)) {
-    int8_t bits[8];
-    bits[0] = bits[1] = bits[2] = bits[3] = bits[4] = bits[5] = bits[6] = bits[7] = -1;
+  for (uint8_t output = 0; output < 8; output++) {
+    if (default_state.outputs[output] != NO_GATE) {
+      printf("Skipping output %d.\n", output);
+      continue;
+    }
+    printf("Generating circuit for output %d...\n", output);
+    int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    state st = default_state;
     st.outputs[output] = create_circuit(&st, g_target[output], mask, bits);
     if (st.outputs[output] == NO_GATE) {
       printf("Error: no solution for output %d.\n", output);
@@ -562,72 +663,7 @@ static void *circuit_thread(void *param) {
         out + 12, out + 14);
     save_state(fname, st);
   }
-  pthread_mutex_lock(&g_threadcount_lock);
-  g_threadcount--;
-  pthread_mutex_unlock(&g_threadcount_lock);
-  return NULL;
-}
 
-int main(int argc, char **argv) {
-
-  if (pthread_mutex_init(&g_next_lock, NULL) != 0
-      || pthread_mutex_init(&g_threadcount_lock, NULL) != 0) {
-    fprintf(stderr, "Error initializing mutexes.\n");
-    return 1;
-  }
-
-  for (uint8_t i = 0; i < 8; i++) {
-    g_target[i] = generate_target(i, true);
-  }
-
-  if (argc == 1) {
-    printf("No command line arguments - generating 1 output circuits.\n");
-    g_default_state.max_gates = MAX_GATES;
-    g_default_state.num_gates = 8;
-    for (uint8_t i = 0; i < 8; i++) {
-      g_default_state.gates[i].type = IN;
-      g_default_state.gates[i].table = generate_target(i, false);
-      g_default_state.gates[i].in1 = NO_GATE;
-      g_default_state.gates[i].in2 = NO_GATE;
-      g_default_state.outputs[i] = NO_GATE;
-    }
-  } else if (argc == 2) {
-    FILE *fp = fopen(argv[1], "r");
-    if (fp == NULL) {
-      printf("Error opening file: %s\n", argv[1]);
-      return 1;
-    }
-    if (fread(&g_default_state, sizeof(state), 1, fp) != 1) {
-      printf("Error reading file: %s\n", argv[1]);
-      fclose(fp);
-      return 1;
-    }
-    fclose(fp);
-    printf("Loaded state from %s\n", argv[1]);
-    g_default_state.max_gates = MAX_GATES;
-  } else {
-    printf("Illegal arguments. Exiting!\n");
-    return 1;
-  }
-
-  uint32_t numproc = sysconf(_SC_NPROCESSORS_ONLN);
-  printf("%" PRIu32 " processors online.\n", numproc);
-
-  g_next = 0;
-  pthread_t thread_id[numproc];
-  for (uint32_t i = 0; i < numproc; i++) {
-    pthread_create(&thread_id[i], NULL, circuit_thread, NULL);
-  }
-
-  uint32_t tcount;
-  do {
-    usleep(100000);
-    pthread_mutex_lock(&g_threadcount_lock);
-    tcount = g_threadcount;
-    pthread_mutex_unlock(&g_threadcount_lock);
-  } while (tcount != 0);
-
-  pthread_mutex_destroy(&g_next_lock);
   pthread_mutex_destroy(&g_threadcount_lock);
 
   return 0;
