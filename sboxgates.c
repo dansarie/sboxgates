@@ -16,6 +16,7 @@
 #include <x86intrin.h>
 
 #define MAX_GATES 500
+#define MIN_STACK_SIZE 0x200000
 #define NO_GATE ((uint64_t)-1)
 
 typedef enum {IN, NOT, AND, OR, XOR} gate_type;
@@ -25,29 +26,30 @@ typedef __m256i ttable;
 typedef struct {
   gate_type type;
   ttable table;
-  uint64_t in1;
-  uint64_t in2;
+  uint64_t in1; /* Input 1 to the gate. NO_GATE for the inputs. */
+  uint64_t in2; /* Input 2 to the gate. NO_GATE for NOT gates and the inputs. */
 } gate;
 
 typedef struct {
-  gate gates[MAX_GATES];
   uint64_t max_gates;
   uint64_t num_gates;  /* Current number of gates. */
   uint64_t outputs[8]; /* Gate number of the respective output gates, or NO_GATE. */
+  gate gates[MAX_GATES];
 } state;
 
+/* Parameters for run_create_circuit. The function calls create_circuit twice in succession, the
+   first time with mask1 and the second time with mask2. The return values will be written to the
+   variables pointed to by ret1 and ret2. The new state will be written to the struct pointed to by
+   st. */
 typedef struct {
   state *st;
   const ttable target;
   const ttable mask1;
   const ttable mask2;
   const int8_t *inbits;
+  uint64_t *ret1;
+  uint64_t *ret2;
 } create_circuit_params;
-
-typedef struct {
-  uint64_t ret1;
-  uint64_t ret2;
-} create_circuit_return;
 
 const uint8_t g_sbox_enc[] = {
     0x9c, 0xf2, 0x14, 0xc1, 0x8e, 0xcb, 0xb2, 0x65, 0x97, 0x7a, 0x60, 0x17, 0x92, 0xf9, 0x78, 0x41,
@@ -67,10 +69,12 @@ const uint8_t g_sbox_enc[] = {
     0xcd, 0x15, 0x21, 0x23, 0xd8, 0xb6, 0x0c, 0x3f, 0x54, 0x1a, 0xbf, 0x98, 0x48, 0x3a, 0x75, 0x77,
     0x2b, 0xae, 0x36, 0xda, 0x7e, 0x86, 0x35, 0x51, 0x05, 0x12, 0xb8, 0xa6, 0x9a, 0x2c, 0x06, 0x4b};
 
-pthread_mutex_t g_threadcount_lock;
-uint32_t g_threadcount = 1;
-uint32_t g_numproc = 0;
-ttable g_target[8];
+pthread_mutex_t g_threadcount_lock; /* Lock for g_threadcount. */
+uint32_t g_threadcount = 1;         /* Number of running threads. */
+uint32_t g_numproc = 0;             /* Number of running logical processors. */
+ttable g_target[8];                 /* Truth tables for the output bits of the sbox. */
+
+pthread_attr_t g_thread_attr; /* Attributes for threads spawned by create_circuit. */
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -193,30 +197,25 @@ static inline uint64_t add_or_xor_gate(state *st, uint64_t gid1, uint64_t gid2, 
   return add_xor_gate(st, add_or_gate(st, gid1, gid2), gid3);
 }
 
-/* Copies a state variable to another. */
-static inline void copy_state(state *dst, state *src) {
-  memcpy(dst->gates, src->gates, sizeof(gate) * MAX_GATES);
-  dst->max_gates = src->max_gates;
-  dst->num_gates = src->num_gates;
-  memcpy(dst->outputs, src->outputs, sizeof(uint64_t) * 8);
-}
-
 static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
     const int8_t *inbits);
 
-static void *create_circuit_thread(void *param) {
-  assert(param != NULL);
-  create_circuit_return *ret = (create_circuit_return*)malloc(sizeof(create_circuit_return));
-  assert(ret != NULL);
-  create_circuit_params ccp;
-  memcpy(&ccp, param, sizeof(create_circuit_params));
-  ret->ret1 = create_circuit(ccp.st, ccp.target, ccp.mask1, ccp.inbits);
-  if (ret->ret1 == NO_GATE) {
-    ret->ret2 = NO_GATE;
-    return (void*)ret;
+/* Calls create_circuit twice. Added to enable forking in create_circuit. The params variable is
+   a pointer to a create_circuit_params struct. */
+static void *run_create_circuit(void *params) {
+  create_circuit_params par = *((create_circuit_params*)params);
+  assert(par.st != NULL);
+  assert(par.inbits != NULL);
+  assert(par.ret1 != NULL);
+  assert(par.ret2 != NULL);
+
+  *par.ret1 = create_circuit(par.st, par.target, par.mask1, par.inbits);
+  if (*par.ret1 != NO_GATE) {
+    *par.ret2 = create_circuit(par.st, par.target, par.mask2, par.inbits);
+  } else {
+    *par.ret2 = NO_GATE;
   }
-  ret->ret2 = create_circuit(ccp.st, ccp.target, ccp.mask2, ccp.inbits);
-  return (void*)ret;
+  return NULL;
 }
 
 static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
@@ -388,13 +387,8 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   next_inbits[bitp] = -1;
   next_inbits[bitp + 1] = -1;
 
-  state *best = (state*)malloc(sizeof(state)); /* Best state so far. */
-  state *nst1 = (state*)malloc(sizeof(state)); /* New state 1 */
-  state *nst2 = (state*)malloc(sizeof(state)); /* New state 2 */
-  assert(best != NULL);
-  assert(nst1 != NULL);
-  assert(nst2 != NULL);
-  best->num_gates = 0;
+  state best;
+  best.num_gates = 0;
   for (int8_t bit = 0; bit < 8; bit++) {
 
     /* Check if the current bit number has already been used for selection. */
@@ -409,53 +403,43 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       continue;
     }
 
-    copy_state(nst1, st);
-    copy_state(nst2, st);
+    state nst1 = *st; /* New state 1 */
+    state nst2 = *st; /* New state 2 */
     next_inbits[bitp] = bit;
 
-    ttable fsel = st->gates[bit].table;
+    ttable fsel = st->gates[bit].table; /* Selection bit. */
     ttable maskb = mask & ~fsel;
     ttable maskc = mask & fsel;
 
-    pthread_t threadid;
+    uint64_t fb1 = NO_GATE;
+    uint64_t fc1 = NO_GATE;
+    create_circuit_params params = {&nst1, target, maskb, maskc, next_inbits, &fb1, &fc1};
+
     bool separate_thread = false;
-    create_circuit_params *ccp = NULL;
+    pthread_t thread;
     pthread_mutex_lock(&g_threadcount_lock);
-    if (g_threadcount < g_numproc) {
+    if (g_threadcount < g_numproc + 1) {
       separate_thread = true;
-      ccp = (create_circuit_params*)malloc(sizeof(create_circuit_params));
-      assert(ccp != NULL);
-      create_circuit_params tccp = {nst1, target, maskb, maskc, next_inbits};
-      memcpy(ccp, &tccp, sizeof(create_circuit_params));
-      pthread_create(&threadid, NULL, create_circuit_thread, ccp);
       g_threadcount += 1;
+      if (pthread_create(&thread, &g_thread_attr, run_create_circuit, &params) != 0) {
+        separate_thread = false;
+        g_threadcount -= 1;
+        fprintf(stderr, "Thread creation failed.\n");
+      }
     }
     pthread_mutex_unlock(&g_threadcount_lock);
 
-    uint64_t fb1 = NO_GATE;
-    uint64_t fc1 = NO_GATE;
     if (!separate_thread) {
-      fb1 = create_circuit(nst1, target, maskb, next_inbits);
-      if (fb1 != NO_GATE) {
-        fc1 = create_circuit(nst1, target, maskc, next_inbits);
-      }
+      run_create_circuit(&params);
     }
 
-    uint64_t fc2 = create_circuit(nst2, target, maskc, next_inbits);
     uint64_t fb2 = NO_GATE;
-    if (fc2 != NO_GATE) {
-      fb2 = create_circuit(nst2, target, maskb, next_inbits);
-    }
+    uint64_t fc2 = NO_GATE;
+    create_circuit_params params2 = {&nst2, target, maskc, maskb, next_inbits, &fc2, &fb2};
+    run_create_circuit(&params2);
 
     if (separate_thread) {
-      create_circuit_return *ret = NULL;
-      pthread_join(threadid, (void**)&ret);
-      fb1 = ret->ret1;
-      fc1 = ret->ret2;
-      free(ret);
-      free(ccp);
-      ccp = NULL;
-      ret = NULL;
+      pthread_join(thread, NULL);
       pthread_mutex_lock(&g_threadcount_lock);
       g_threadcount -= 1;
       pthread_mutex_unlock(&g_threadcount_lock);
@@ -466,8 +450,8 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
     }
 
     uint64_t fb, fc;
-    state *nst;
-    if (fc1 < fb2) {
+    state nst;
+    if (nst1.num_gates < nst2.num_gates) {
       fb = fb1;
       fc = fc1;
       nst = nst1;
@@ -476,24 +460,20 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       fc = fc2;
       nst = nst2;
     }
-    uint64_t andg = add_and_gate(nst, fc, bit);
+    uint64_t andg = add_and_gate(&nst, fc, bit);
     if (andg == NO_GATE) {
       continue;
     }
-    uint64_t outg = add_xor_gate(nst, andg, fb);
-    if (best->num_gates == 0 || outg + 1 < best->num_gates) {
-      copy_state(best, nst);
+    uint64_t outg = add_xor_gate(&nst, andg, fb);
+    if (best.num_gates == 0 || outg + 1 < best.num_gates) {
+      best = nst;
     }
   }
-  free(nst1);
-  free(nst2);
-  if (best->num_gates == 0) {
-    free(best);
+  if (best.num_gates == 0) {
     return NO_GATE;
   }
-  copy_state(st, best);
-  uint64_t ret = best->num_gates - 1;
-  free(best);
+  *st = best;
+  uint64_t ret = best.num_gates - 1;
   return ret;
 }
 
@@ -575,6 +555,15 @@ static void save_state(const char *name, state st) {
 
 int main(int argc, char **argv) {
 
+  pthread_attr_init(&g_thread_attr);
+  size_t stacksize;
+  pthread_attr_getstacksize(&g_thread_attr, &stacksize);
+  printf("Default stack size: 0x%zx.\n", stacksize);
+  if (stacksize < MIN_STACK_SIZE) {
+    pthread_attr_setstacksize(&g_thread_attr, MIN_STACK_SIZE);
+    printf("New stack size: 0x%x.\n", MIN_STACK_SIZE);
+  }
+
   /* Initialize mutex. */
   if (pthread_mutex_init(&g_threadcount_lock, NULL) != 0) {
     fprintf(stderr, "Error initializing mutexes.\n");
@@ -593,6 +582,7 @@ int main(int argc, char **argv) {
     /* Generate the eight input bits. */
     default_state.max_gates = MAX_GATES;
     default_state.num_gates = 8;
+    memset(default_state.gates, 0, sizeof(gate) * MAX_GATES);
     for (uint8_t i = 0; i < 8; i++) {
       default_state.gates[i].type = IN;
       default_state.gates[i].table = generate_target(i, false);
@@ -646,21 +636,17 @@ int main(int argc, char **argv) {
         num_outputs += 1;
       }
     }
-    char out[16];
-    memset(out, 0, 16);
-    out[0]  = st.outputs[0] == NO_GATE ? '\0' : '0';
-    out[2]  = st.outputs[1] == NO_GATE ? '\0' : '1';
-    out[4]  = st.outputs[2] == NO_GATE ? '\0' : '2';
-    out[6]  = st.outputs[3] == NO_GATE ? '\0' : '3';
-    out[8]  = st.outputs[4] == NO_GATE ? '\0' : '4';
-    out[10] = st.outputs[5] == NO_GATE ? '\0' : '5';
-    out[12] = st.outputs[6] == NO_GATE ? '\0' : '6';
-    out[14] = st.outputs[7] == NO_GATE ? '\0' : '7';
+    char out[9];
+    memset(out, 0, 9);
+    for (uint8_t i = 0; i < 8; i++) {
+      if (st.outputs[i] != NO_GATE) {
+        char str[2] = {'0' + i, '\0'};
+        strcat(out, str);
+      }
+    }
 
     char fname[30];
-    sprintf(fname, "%d-%03" PRIu64 "-%s%s%s%s%s%s%s%s.state",
-        num_outputs, st.num_gates - 7, out, out + 2, out + 4, out + 6, out + 8, out + 10,
-        out + 12, out + 14);
+    sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs, st.num_gates - 7, out);
     save_state(fname, st);
   }
 
