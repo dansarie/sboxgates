@@ -112,6 +112,11 @@ static inline bool ttable_equals_mask(const ttable in1, const ttable in2, const 
 /* Adds a gate to the state st. Returns the gate id of the added gate. */
 static inline uint64_t add_gate(state *st, gate_type type, ttable table, uint64_t gid1,
     uint64_t gid2) {
+  if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT)) {
+    return NO_GATE;
+  }
+  assert(gid1 < st->num_gates);
+  assert(gid2 < st->num_gates || type == NOT);
   if (st->num_gates >= st->max_gates) {
     return NO_GATE;
   }
@@ -389,6 +394,8 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
 
   state best;
   best.num_gates = 0;
+
+  /* Try all input bit orders. */
   for (int8_t bit = 0; bit < 8; bit++) {
 
     /* Check if the current bit number has already been used for selection. */
@@ -418,7 +425,7 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
     bool separate_thread = false;
     pthread_t thread;
     pthread_mutex_lock(&g_threadcount_lock);
-    if (g_threadcount < g_numproc + 1) {
+    if (g_threadcount < g_numproc + 2) {
       separate_thread = true;
       g_threadcount += 1;
       if (pthread_create(&thread, &g_thread_attr, run_create_circuit, &params) != 0) {
@@ -432,6 +439,8 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
     if (!separate_thread) {
       run_create_circuit(&params);
     }
+
+    /* Generate the two maps in opposite order. */
 
     uint64_t fb2 = NO_GATE;
     uint64_t fc2 = NO_GATE;
@@ -449,9 +458,10 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       continue;
     }
 
+    /* Pick the smallest set of gates out of the two generated above. */
     uint64_t fb, fc;
     state nst;
-    if (nst1.num_gates < nst2.num_gates) {
+    if (fb2 == NO_GATE || nst1.num_gates < nst2.num_gates) {
       fb = fb1;
       fc = fc1;
       nst = nst1;
@@ -477,10 +487,8 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   return ret;
 }
 
-/*
- * If sbox is true, a target truth table for the given bit of the sbox is generated.
- * If sbox is false, the truth table of the given input bit is generated.
- */
+/* If sbox is true, a target truth table for the given bit of the sbox is generated.
+   If sbox is false, the truth table of the given input bit is generated. */
 static ttable generate_target(uint8_t bit, bool sbox) {
   assert(bit < 8);
   uint64_t vec[] = {0, 0, 0, 0};
@@ -541,6 +549,7 @@ void print_digraph(state st) {
   printf("}\n");
 }
 
+/* Saves a state struct to file. */
 static void save_state(const char *name, state st) {
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
@@ -558,10 +567,8 @@ int main(int argc, char **argv) {
   pthread_attr_init(&g_thread_attr);
   size_t stacksize;
   pthread_attr_getstacksize(&g_thread_attr, &stacksize);
-  printf("Default stack size: 0x%zx.\n", stacksize);
   if (stacksize < MIN_STACK_SIZE) {
     pthread_attr_setstacksize(&g_thread_attr, MIN_STACK_SIZE);
-    printf("New stack size: 0x%x.\n", MIN_STACK_SIZE);
   }
 
   /* Initialize mutex. */
@@ -593,11 +600,11 @@ int main(int argc, char **argv) {
   } else if (argc == 2 || (argc == 3 && strcmp(argv[1], "-dot") == 0)) {
     FILE *fp = fopen(argv[argc - 1], "r");
     if (fp == NULL) {
-      printf("Error opening file: %s\n", argv[argc - 1]);
+      fprintf(stderr, "Error opening file: %s\n", argv[argc - 1]);
       return 1;
     }
     if (fread(&default_state, sizeof(state), 1, fp) != 1) {
-      printf("Error reading file: %s\n", argv[argc - 1]);
+      fprintf(stderr, "Error reading file: %s\n", argv[argc - 1]);
       fclose(fp);
       return 1;
     }
@@ -609,7 +616,7 @@ int main(int argc, char **argv) {
     printf("Loaded state from %s\n", argv[1]);
     default_state.max_gates = MAX_GATES;
   } else {
-    printf("Illegal arguments. Exiting!\n");
+    fprintf(stderr, "Illegal arguments. Exiting!\n");
     return 1;
   }
 
@@ -627,7 +634,7 @@ int main(int argc, char **argv) {
     state st = default_state;
     st.outputs[output] = create_circuit(&st, g_target[output], mask, bits);
     if (st.outputs[output] == NO_GATE) {
-      printf("Error: no solution for output %d.\n", output);
+      printf("No solution for output %d.\n", output);
       continue;
     }
     uint8_t num_outputs = 0;
@@ -648,6 +655,10 @@ int main(int argc, char **argv) {
     char fname[30];
     sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs, st.num_gates - 7, out);
     save_state(fname, st);
+    if (default_state.max_gates > st.num_gates) {
+      default_state.max_gates = st.num_gates;
+      printf("New max gates: %llu\n", default_state.max_gates);
+    }
   }
 
   pthread_mutex_destroy(&g_threadcount_lock);
