@@ -8,7 +8,6 @@
 
 #include <assert.h>
 #include <inttypes.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -55,12 +54,7 @@ const uint8_t g_sbox_enc[] = {
     0xcd, 0x15, 0x21, 0x23, 0xd8, 0xb6, 0x0c, 0x3f, 0x54, 0x1a, 0xbf, 0x98, 0x48, 0x3a, 0x75, 0x77,
     0x2b, 0xae, 0x36, 0xda, 0x7e, 0x86, 0x35, 0x51, 0x05, 0x12, 0xb8, 0xa6, 0x9a, 0x2c, 0x06, 0x4b};
 
-pthread_mutex_t g_threadcount_lock; /* Lock for g_threadcount. */
-uint32_t g_threadcount = 1;         /* Number of running threads. */
-uint32_t g_numproc = 0;             /* Number of running logical processors. */
 ttable g_target[8];                 /* Truth tables for the output bits of the sbox. */
-
-pthread_attr_t g_thread_attr; /* Attributes for threads spawned by create_circuit. */
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -188,9 +182,6 @@ static inline uint64_t add_or_and_gate(state *st, uint64_t gid1, uint64_t gid2, 
 static inline uint64_t add_or_xor_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
   return add_xor_gate(st, add_or_gate(st, gid1, gid2), gid3);
 }
-
-static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
-    const int8_t *inbits);
 
 static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
@@ -378,7 +369,6 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       continue;
     }
 
-
     next_inbits[bitp] = bit;
     const ttable fsel = st->gates[bit].table; /* Selection bit. */
 
@@ -392,9 +382,9 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       mux_out_and = add_xor_gate(&nst_and, fb, andg);
     }
 
-    state nst_or  = *st; /* New state using OR multiplexer. */
+    state nst_or = *st; /* New state using OR multiplexer. */
     uint64_t fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits);
-    uint64_t mux_out_or;
+    uint64_t mux_out_or = NO_GATE;
     if (fd != NO_GATE) {
       uint64_t fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
           next_inbits);
@@ -504,19 +494,6 @@ static void save_state(const char *name, state st) {
 
 int main(int argc, char **argv) {
 
-  pthread_attr_init(&g_thread_attr);
-  size_t stacksize;
-  pthread_attr_getstacksize(&g_thread_attr, &stacksize);
-  if (stacksize < MIN_STACK_SIZE) {
-    pthread_attr_setstacksize(&g_thread_attr, MIN_STACK_SIZE);
-  }
-
-  /* Initialize mutex. */
-  if (pthread_mutex_init(&g_threadcount_lock, NULL) != 0) {
-    fprintf(stderr, "Error initializing mutexes.\n");
-    return 1;
-  }
-
   /* Generate truth tables for all output bits of the target sbox. */
   for (uint8_t i = 0; i < 8; i++) {
     g_target[i] = generate_target(i, true);
@@ -560,9 +537,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  g_numproc = sysconf(_SC_NPROCESSORS_ONLN);
-  printf("%" PRIu32 " processors online.\n", g_numproc);
-
   const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
   for (uint8_t output = 0; output < 8; output++) {
     if (default_state.outputs[output] != NO_GATE) {
@@ -601,8 +575,6 @@ int main(int argc, char **argv) {
       printf("New max gates: %llu\n", default_state.max_gates);
     }
   }
-
-  pthread_mutex_destroy(&g_threadcount_lock);
 
   return 0;
 }
