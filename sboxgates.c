@@ -37,20 +37,6 @@ typedef struct {
   gate gates[MAX_GATES];
 } state;
 
-/* Parameters for run_create_circuit. The function calls create_circuit twice in succession, the
-   first time with mask1 and the second time with mask2. The return values will be written to the
-   variables pointed to by ret1 and ret2. The new state will be written to the struct pointed to by
-   st. */
-typedef struct {
-  state *st;
-  const ttable target;
-  const ttable mask1;
-  const ttable mask2;
-  const int8_t *inbits;
-  uint64_t *ret1;
-  uint64_t *ret2;
-} create_circuit_params;
-
 const uint8_t g_sbox_enc[] = {
     0x9c, 0xf2, 0x14, 0xc1, 0x8e, 0xcb, 0xb2, 0x65, 0x97, 0x7a, 0x60, 0x17, 0x92, 0xf9, 0x78, 0x41,
     0x07, 0x4c, 0x67, 0x6d, 0x66, 0x4a, 0x30, 0x7d, 0x53, 0x9d, 0xb5, 0xbc, 0xc3, 0xca, 0xf1, 0x04,
@@ -115,6 +101,7 @@ static inline uint64_t add_gate(state *st, gate_type type, ttable table, uint64_
   if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT)) {
     return NO_GATE;
   }
+  assert(type != IN);
   assert(gid1 < st->num_gates);
   assert(gid2 < st->num_gates || type == NOT);
   if (st->num_gates >= st->max_gates) {
@@ -204,24 +191,6 @@ static inline uint64_t add_or_xor_gate(state *st, uint64_t gid1, uint64_t gid2, 
 
 static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
     const int8_t *inbits);
-
-/* Calls create_circuit twice. Added to enable forking in create_circuit. The params variable is
-   a pointer to a create_circuit_params struct. */
-static void *run_create_circuit(void *params) {
-  create_circuit_params par = *((create_circuit_params*)params);
-  assert(par.st != NULL);
-  assert(par.inbits != NULL);
-  assert(par.ret1 != NULL);
-  assert(par.ret2 != NULL);
-
-  *par.ret1 = create_circuit(par.st, par.target, par.mask1, par.inbits);
-  if (*par.ret1 != NO_GATE) {
-    *par.ret2 = create_circuit(par.st, par.target, par.mask2, par.inbits);
-  } else {
-    *par.ret2 = NO_GATE;
-  }
-  return NULL;
-}
 
 static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
@@ -397,7 +366,6 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
 
   /* Try all input bit orders. */
   for (int8_t bit = 0; bit < 8; bit++) {
-
     /* Check if the current bit number has already been used for selection. */
     bool skip = false;
     for (uint8_t i = 0; i < bitp; i++) {
@@ -410,72 +378,44 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       continue;
     }
 
-    state nst1 = *st; /* New state 1 */
-    state nst2 = *st; /* New state 2 */
+
     next_inbits[bitp] = bit;
+    const ttable fsel = st->gates[bit].table; /* Selection bit. */
 
-    ttable fsel = st->gates[bit].table; /* Selection bit. */
-    ttable maskb = mask & ~fsel;
-    ttable maskc = mask & fsel;
-
-    uint64_t fb1 = NO_GATE;
-    uint64_t fc1 = NO_GATE;
-    create_circuit_params params = {&nst1, target, maskb, maskc, next_inbits, &fb1, &fc1};
-
-    bool separate_thread = false;
-    pthread_t thread;
-    pthread_mutex_lock(&g_threadcount_lock);
-    if (g_threadcount < g_numproc + 2) {
-      separate_thread = true;
-      g_threadcount += 1;
-      if (pthread_create(&thread, &g_thread_attr, run_create_circuit, &params) != 0) {
-        separate_thread = false;
-        g_threadcount -= 1;
-        fprintf(stderr, "Thread creation failed.\n");
-      }
-    }
-    pthread_mutex_unlock(&g_threadcount_lock);
-
-    if (!separate_thread) {
-      run_create_circuit(&params);
+    state nst_and = *st; /* New state using AND multiplexer. */
+    uint64_t fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits);
+    uint64_t mux_out_and = NO_GATE;
+    if (fb != NO_GATE) {
+      uint64_t fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
+          next_inbits);
+      uint64_t andg = add_and_gate(&nst_and, fc, bit);
+      mux_out_and = add_xor_gate(&nst_and, fb, andg);
     }
 
-    /* Generate the two maps in opposite order. */
-
-    uint64_t fb2 = NO_GATE;
-    uint64_t fc2 = NO_GATE;
-    create_circuit_params params2 = {&nst2, target, maskc, maskb, next_inbits, &fc2, &fb2};
-    run_create_circuit(&params2);
-
-    if (separate_thread) {
-      pthread_join(thread, NULL);
-      pthread_mutex_lock(&g_threadcount_lock);
-      g_threadcount -= 1;
-      pthread_mutex_unlock(&g_threadcount_lock);
+    state nst_or  = *st; /* New state using OR multiplexer. */
+    uint64_t fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits);
+    uint64_t mux_out_or;
+    if (fd != NO_GATE) {
+      uint64_t fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
+          next_inbits);
+      uint64_t org = add_or_gate(&nst_or, fe, bit);
+      mux_out_or = add_xor_gate(&nst_or, fd, org);
     }
 
-    if (fc1 == NO_GATE && fb2 == NO_GATE) {
+    if (mux_out_and == NO_GATE && mux_out_or == NO_GATE) {
       continue;
     }
-
-    /* Pick the smallest set of gates out of the two generated above. */
-    uint64_t fb, fc;
+    uint64_t mux_out;
     state nst;
-    if (fb2 == NO_GATE || nst1.num_gates < nst2.num_gates) {
-      fb = fb1;
-      fc = fc1;
-      nst = nst1;
+    if (mux_out_or == NO_GATE || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
+      nst = nst_and;
+      mux_out = mux_out_and;
     } else {
-      fb = fb2;
-      fc = fc2;
-      nst = nst2;
+      nst = nst_or;
+      mux_out = mux_out_or;
     }
-    uint64_t andg = add_and_gate(&nst, fc, bit);
-    if (andg == NO_GATE) {
-      continue;
-    }
-    uint64_t outg = add_xor_gate(&nst, andg, fb);
-    if (best.num_gates == 0 || outg + 1 < best.num_gates) {
+    assert(ttable_equals_mask(target, nst.gates[mux_out].table, mask));
+    if (best.num_gates == 0 || nst.num_gates < best.num_gates) {
       best = nst;
     }
   }
@@ -637,6 +577,7 @@ int main(int argc, char **argv) {
       printf("No solution for output %d.\n", output);
       continue;
     }
+    assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
     uint8_t num_outputs = 0;
     for (uint8_t i = 0; i < 8; i++) {
       if (st.outputs[i] != NO_GATE) {
