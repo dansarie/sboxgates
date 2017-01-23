@@ -515,7 +515,7 @@ static void print_c_function(const state st) {
       "%s*out1, %s*out2, %s*out3, %s*out4, %s*out5, %s*out6,\n"
       "%s*out7) {\n", TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE,
       TYPE, TYPE, TYPE);
-  for (uint8_t gate = 8; gate < st.num_gates; gate++) {
+  for (uint64_t gate = 8; gate < st.num_gates; gate++) {
     bool ret = get_c_variable_name(st, gate, buf);
     printf("  %s%s = ", ret == true ? TYPE : "", buf);
     get_c_variable_name(st, st.gates[gate].in1, buf);
