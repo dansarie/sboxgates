@@ -8,6 +8,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <omp.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,12 +16,11 @@
 #include <x86intrin.h>
 
 #define MAX_GATES 500
-#define MIN_STACK_SIZE 0x200000
 #define NO_GATE ((uint64_t)-1)
 
 typedef enum {IN, NOT, AND, OR, XOR} gate_type;
 
-typedef __m256i ttable;
+typedef __m256i ttable; /* 256 bit truth table. */
 
 typedef struct {
   gate_type type;
@@ -54,7 +54,7 @@ const uint8_t g_sbox_enc[] = {
     0xcd, 0x15, 0x21, 0x23, 0xd8, 0xb6, 0x0c, 0x3f, 0x54, 0x1a, 0xbf, 0x98, 0x48, 0x3a, 0x75, 0x77,
     0x2b, 0xae, 0x36, 0xda, 0x7e, 0x86, 0x35, 0x51, 0x05, 0x12, 0xb8, 0xa6, 0x9a, 0x2c, 0x06, 0x4b};
 
-ttable g_target[8];                 /* Truth tables for the output bits of the sbox. */
+ttable g_target[8]; /* Truth tables for the output bits of the sbox. */
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -89,7 +89,8 @@ static inline bool ttable_equals_mask(const ttable in1, const ttable in2, const 
   return _mm256_testz_si256(res, res);
 }
 
-/* Adds a gate to the state st. Returns the gate id of the added gate. */
+/* Adds a gate to the state st. Returns the gate id of the added gate. If an input gate is
+   equal to NO_GATE (only gid1 in case of a NOT gate), NO_GATE will be returned. */
 static inline uint64_t add_gate(state *st, gate_type type, ttable table, uint64_t gid1,
     uint64_t gid2) {
   if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT)) {
@@ -183,13 +184,15 @@ static inline uint64_t add_or_xor_gate(state *st, uint64_t gid1, uint64_t gid2, 
   return add_xor_gate(st, add_or_gate(st, gid1, gid2), gid3);
 }
 
+/* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
+   paper. */
 static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
 
   /* 1. Look through the existing circuit. If there is a gate that produces the desired map, simply
      return the ID of that gate. */
 
-  for (uint64_t i = 0; i < st->num_gates; i++) {
+  for (int64_t i = st->num_gates - 1; i >= 0; i--) {
     if (ttable_equals_mask(target, st->gates[i].table, mask)) {
       return i;
     }
@@ -198,7 +201,7 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   /* 2. If there are any gates whose inverse produces the desired map, append a NOT gate, and
      return the ID of the NOT gate. */
 
-  for (uint64_t i = 0; i < st->num_gates; i++) {
+  for (int64_t i = st->num_gates - 1; i >= 0; i--) {
     if (ttable_equals_mask(target, ~st->gates[i].table, mask)) {
       return add_not_gate(st, i);
     }
@@ -208,9 +211,9 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
      gate to produce the desired map, add that single gate and return its ID. */
 
   const ttable mtarget = target & mask;
-  for (uint64_t i = 0; i < st->num_gates; i++) {
+  for (int64_t i = st->num_gates - 1; i >= 0; i--) {
     ttable ti = st->gates[i].table & mask;
-    for (uint64_t k = i + 1; k < st->num_gates; k++) {
+    for (int64_t k = i - 1; k >= 0; k--) {
       ttable tk = st->gates[k].table & mask;
       if (ttable_equals(mtarget, ti | tk)) {
         return add_or_gate(st, i, k);
@@ -228,9 +231,9 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
      two gates to produce the desired map, add the gates, and return the ID of the one that produces
      the desired map. */
 
-  for (uint64_t i = 0; i < st->num_gates; i++) {
+  for (int64_t i = st->num_gates - 1; i >= 0; i--) {
     ttable ti = st->gates[i].table;
-    for (uint64_t k = i + 1; k < st->num_gates; k++) {
+    for (int64_t k = i - 1; k >= 0; k--) {
       ttable tk = st->gates[k].table;
       if (ttable_equals_mask(target, ~(ti | tk), mask)) {
         return add_nor_gate(st, i, k);
@@ -256,14 +259,14 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
     }
   }
 
-  for (uint64_t i = 0; i < st->num_gates; i++) {
+  for (int64_t i = st->num_gates - 1; i >= 0; i--) {
     ttable ti = st->gates[i].table & mask;
-    for (uint64_t k = i + 1; k < st->num_gates; k++) {
+    for (int64_t k = i - 1; k >= 0; k--) {
       ttable tk = st->gates[k].table & mask;
       ttable iandk = ti & tk;
       ttable iork = ti | tk;
       ttable ixork = ti ^ tk;
-      for (uint64_t m = k + 1; m < st->num_gates; m++) {
+      for (int64_t m = k - 1; m >= 0; m--) {
         ttable tm = st->gates[m].table & mask;
         if (ttable_equals(mtarget, iandk & tm)) {
           return add_and_3_gate(st, i, k, m);
@@ -352,10 +355,13 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   next_inbits[bitp] = -1;
   next_inbits[bitp + 1] = -1;
 
-  state best;
-  best.num_gates = 0;
+  state nst[8];
+  for (uint8_t i = 0; i < 8; i++) {
+    nst[i].num_gates = 0;
+  }
 
   /* Try all input bit orders. */
+#pragma omp parallel for firstprivate(next_inbits, bitp)
   for (int8_t bit = 0; bit < 8; bit++) {
     /* Check if the current bit number has already been used for selection. */
     bool skip = false;
@@ -396,17 +402,20 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       continue;
     }
     uint64_t mux_out;
-    state nst;
     if (mux_out_or == NO_GATE || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
-      nst = nst_and;
+      nst[bit] = nst_and;
       mux_out = mux_out_and;
     } else {
-      nst = nst_or;
+      nst[bit] = nst_or;
       mux_out = mux_out_or;
     }
-    assert(ttable_equals_mask(target, nst.gates[mux_out].table, mask));
-    if (best.num_gates == 0 || nst.num_gates < best.num_gates) {
-      best = nst;
+    assert(ttable_equals_mask(target, nst[bit].gates[mux_out].table, mask));
+  }
+  state best;
+  best.num_gates = 0;
+  for (uint8_t i = 0; i < 8; i++) {
+    if ((best.num_gates == 0 || nst[i].num_gates < best.num_gates) && nst[i].num_gates != 0) {
+      best = nst[i];
     }
   }
   if (best.num_gates == 0) {
@@ -438,7 +447,7 @@ static ttable generate_target(uint8_t bit, bool sbox) {
 }
 
 /* Prints the given state gate network to stdout in Graphviz dot format. */
-void print_digraph(state st) {
+void print_digraph(const state st) {
   printf("digraph sbox {\n");
     for (uint64_t gt = 0; gt < st.num_gates; gt++) {
       char *gatename;
@@ -460,6 +469,8 @@ void print_digraph(state st) {
         case XOR:
           gatename = "XOR";
           break;
+        default:
+          assert(false);
       }
       printf("  gt%" PRIu64 " [label=\"%s\"];\n", gt, gatename);
     }
@@ -476,6 +487,59 @@ void print_digraph(state st) {
         printf("  gt%" PRIu64 " -> out%" PRIu32 ";\n", st.outputs[i], i);
       }
     }
+  printf("}\n");
+}
+
+/* Called by print_c_function to get variable names. */
+static bool get_c_variable_name(const state st, const uint64_t gate, char *buf) {
+  if (gate < 8) {
+    sprintf(buf, "in%" PRIu64, gate);
+    return false;
+  }
+  for (uint8_t i = 0; i < 8; i++) {
+    if (st.outputs[i] == gate) {
+      sprintf(buf, "*out%d", i);
+      return false;
+    }
+  }
+  sprintf(buf, "var%" PRIu64, gate);
+  return true;
+}
+
+/* Converts the given state gate network to a C function and prints it to stdout. */
+static void print_c_function(const state st) {
+  const char TYPE[] = "__m256i ";
+  char buf[10];
+  printf("static inline void sbox(const %sin0, const %sin1, const %sin2, const %sin3,\n"
+      "const %sin4, const %sin5, const %sin6, const %sin7, %s*out0,\n"
+      "%s*out1, %s*out2, %s*out3, %s*out4, %s*out5, %s*out6,\n"
+      "%s*out7) {\n", TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE,
+      TYPE, TYPE, TYPE);
+  for (uint8_t gate = 8; gate < st.num_gates; gate++) {
+    bool ret = get_c_variable_name(st, gate, buf);
+    printf("  %s%s = ", ret == true ? TYPE : "", buf);
+    get_c_variable_name(st, st.gates[gate].in1, buf);
+    if (st.gates[gate].type == NOT) {
+      printf("~%s;\n", buf);
+      continue;
+    }
+    printf("%s ", buf);
+    switch (st.gates[gate].type) {
+      case AND:
+        printf("& ");
+        break;
+      case OR:
+        printf("| ");
+        break;
+      case XOR:
+        printf("^ ");
+        break;
+      default:
+        assert(false);
+    }
+    get_c_variable_name(st, st.gates[gate].in2, buf);
+    printf("%s;\n", buf);
+  }
   printf("}\n");
 }
 
@@ -499,81 +563,117 @@ int main(int argc, char **argv) {
     g_target[i] = generate_target(i, true);
   }
 
-  state default_state;
+  state start_states[8];
+  uint8_t num_start_states = 1;
 
   if (argc == 1) {
-    printf("No command line arguments - generating 1 output circuits.\n");
     /* Generate the eight input bits. */
-    default_state.max_gates = MAX_GATES;
-    default_state.num_gates = 8;
-    memset(default_state.gates, 0, sizeof(gate) * MAX_GATES);
+    start_states[0].max_gates = MAX_GATES;
+    start_states[0].num_gates = 8;
+    memset(start_states[0].gates, 0, sizeof(gate) * MAX_GATES);
     for (uint8_t i = 0; i < 8; i++) {
-      default_state.gates[i].type = IN;
-      default_state.gates[i].table = generate_target(i, false);
-      default_state.gates[i].in1 = NO_GATE;
-      default_state.gates[i].in2 = NO_GATE;
-      default_state.outputs[i] = NO_GATE;
+      start_states[0].gates[i].type = IN;
+      start_states[0].gates[i].table = generate_target(i, false);
+      start_states[0].gates[i].in1 = NO_GATE;
+      start_states[0].gates[i].in2 = NO_GATE;
+      start_states[0].outputs[i] = NO_GATE;
     }
-  } else if (argc == 2 || (argc == 3 && strcmp(argv[1], "-dot") == 0)) {
+  } else if (argc == 2 || (argc == 3 && strcmp(argv[1], "-dot") == 0)
+      || (argc == 3 && strcmp(argv[1], "-c") == 0)) {
     FILE *fp = fopen(argv[argc - 1], "r");
     if (fp == NULL) {
       fprintf(stderr, "Error opening file: %s\n", argv[argc - 1]);
       return 1;
     }
-    if (fread(&default_state, sizeof(state), 1, fp) != 1) {
+    if (fread(&start_states[0], sizeof(state), 1, fp) != 1) {
       fprintf(stderr, "Error reading file: %s\n", argv[argc - 1]);
       fclose(fp);
       return 1;
     }
     fclose(fp);
     if (argc == 3) {
-      print_digraph(default_state);
+      if (strcmp(argv[1], "-dot") == 0) {
+        print_digraph(start_states[0]);
+      } else {
+        print_c_function(start_states[0]);
+      }
       return 0;
     }
     printf("Loaded state from %s\n", argv[1]);
-    default_state.max_gates = MAX_GATES;
   } else {
     fprintf(stderr, "Illegal arguments. Exiting!\n");
     return 1;
   }
 
-  const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-  for (uint8_t output = 0; output < 8; output++) {
-    if (default_state.outputs[output] != NO_GATE) {
-      printf("Skipping output %d.\n", output);
-      continue;
-    }
-    printf("Generating circuit for output %d...\n", output);
-    int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-    state st = default_state;
-    st.outputs[output] = create_circuit(&st, g_target[output], mask, bits);
-    if (st.outputs[output] == NO_GATE) {
-      printf("No solution for output %d.\n", output);
-      continue;
-    }
-    assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
+  /* Build the gate network one output at a time. After every added output, select the gate network
+     or network with the least amount of gates and add another. */
+  while (1) {
+    uint64_t max_gates = MAX_GATES;
+    state out_states[8];
+    uint8_t num_out_states = 0;
+
+    /* Count the outputs already present in the first of the start states. All start states will
+       have the same number of outputs. */
     uint8_t num_outputs = 0;
     for (uint8_t i = 0; i < 8; i++) {
-      if (st.outputs[i] != NO_GATE) {
+      if (start_states[0].outputs[i] != NO_GATE) {
         num_outputs += 1;
       }
     }
-    char out[9];
-    memset(out, 0, 9);
-    for (uint8_t i = 0; i < 8; i++) {
-      if (st.outputs[i] != NO_GATE) {
-        char str[2] = {'0' + i, '\0'};
-        strcat(out, str);
+    if (num_outputs >= 8) {
+      /* If the input gate network has eight outputs, there is nothing more to do. */
+      printf("Done.\n");
+      break;
+    }
+    printf("Generating circuits with %d output%s.\n", num_outputs + 1, num_outputs == 0 ? "" : "s");
+    for (uint8_t current_state = 0; current_state < num_start_states; current_state++) {
+      start_states[current_state].max_gates = max_gates;
+
+      /* Add all outputs not already present to see which resulting network is the smallest. */
+      for (uint8_t output = 0; output < 8; output++) {
+        if (start_states[current_state].outputs[output] != NO_GATE) {
+          printf("Skipping output %d.\n", output);
+          continue;
+        }
+        printf("Generating circuit for output %d...\n", output);
+        int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+        state st = start_states[current_state];
+        const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
+        st.outputs[output] = create_circuit(&st, g_target[output], mask, bits);
+        if (st.outputs[output] == NO_GATE) {
+          printf("No solution for output %d.\n", output);
+          continue;
+        }
+        assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
+
+        /* Generate a file name and save the gate network to disk. */
+        char out[9];
+        memset(out, 0, 9);
+        for (uint8_t i = 0; i < 8; i++) {
+          if (st.outputs[i] != NO_GATE) {
+            char str[2] = {'0' + i, '\0'};
+            strcat(out, str);
+          }
+        }
+        char fname[30];
+        sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs, st.num_gates - 7, out);
+        save_state(fname, st);
+
+        if (max_gates > st.num_gates) {
+          max_gates = st.num_gates;
+          num_out_states = 0;
+        }
+        if (st.num_gates <= max_gates) {
+          out_states[num_out_states++] = st;
+        }
       }
     }
-
-    char fname[30];
-    sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs, st.num_gates - 7, out);
-    save_state(fname, st);
-    if (default_state.max_gates > st.num_gates) {
-      default_state.max_gates = st.num_gates;
-      printf("New max gates: %llu\n", default_state.max_gates);
+    printf("Found %d state%s with %" PRIu64 " gates.\n", num_out_states,
+        num_out_states == 1 ? "" : "s", max_gates);
+    for (uint8_t i = 0; i < num_out_states; i++) {
+      start_states[i] = out_states[i];
     }
+    num_start_states = num_out_states;
   }
 
   return 0;
