@@ -651,15 +651,15 @@ int main(int argc, char **argv) {
         /* Generate a file name and save the gate network to disk. */
         char out[9];
         memset(out, 0, 9);
-	for (uint64_t i = 0; i < st.num_gates; i++) {
-	  for (uint8_t k = 0; k < 8; k++) {
-	    if (st.outputs[k] == i) {
-	      char str[2] = {'0' + k, '\0'};
-	      strcat(out, str);
-	      break;
-	    }
-	  }
-	}
+        for (uint64_t i = 0; i < st.num_gates; i++) {
+          for (uint8_t k = 0; k < 8; k++) {
+            if (st.outputs[k] == i) {
+              char str[2] = {'0' + k, '\0'};
+              strcat(out, str);
+              break;
+            }
+          }
+        }
         char fname[30];
         sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs + 1, st.num_gates - 7, out);
         save_state(fname, st);
