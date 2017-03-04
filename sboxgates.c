@@ -8,7 +8,11 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#ifdef _OPENMP
 #include <omp.h>
+#else
+#warning "Compiling without OpenMP."
+#endif
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -361,7 +365,9 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   }
 
   /* Try all input bit orders. */
+#ifdef _OPENMP
 #pragma omp parallel for firstprivate(next_inbits, bitp)
+#endif
   for (int8_t bit = 0; bit < 8; bit++) {
     /* Check if the current bit number has already been used for selection. */
     bool skip = false;
@@ -493,12 +499,12 @@ void print_digraph(const state st) {
 /* Called by print_c_function to get variable names. */
 static bool get_c_variable_name(const state st, const uint64_t gate, char *buf) {
   if (gate < 8) {
-    sprintf(buf, "in%" PRIu64, gate);
+    sprintf(buf, "in.b%" PRIu64, gate);
     return false;
   }
   for (uint8_t i = 0; i < 8; i++) {
     if (st.outputs[i] == gate) {
-      sprintf(buf, "*out%d", i);
+      sprintf(buf, "out%d", i);
       return false;
     }
   }
@@ -508,13 +514,9 @@ static bool get_c_variable_name(const state st, const uint64_t gate, char *buf) 
 
 /* Converts the given state gate network to a C function and prints it to stdout. */
 static void print_c_function(const state st) {
-  const char TYPE[] = "__m256i ";
+  const char TYPE[] = "int ";
   char buf[10];
-  printf("static inline void sbox(const %sin0, const %sin1, const %sin2, const %sin3,\n"
-      "const %sin4, const %sin5, const %sin6, const %sin7, %s*out0,\n"
-      "%s*out1, %s*out2, %s*out3, %s*out4, %s*out5, %s*out6,\n"
-      "%s*out7) {\n", TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE, TYPE,
-      TYPE, TYPE, TYPE);
+  printf("__device__ __forceinline__ int s0(eightbits in) {\n");
   for (uint64_t gate = 8; gate < st.num_gates; gate++) {
     bool ret = get_c_variable_name(st, gate, buf);
     printf("  %s%s = ", ret == true ? TYPE : "", buf);
