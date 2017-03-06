@@ -825,7 +825,7 @@ void generate_gate_graph() {
           }
         }
         char fname[30];
-        sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs + 1, st.num_gates - 7, out);
+        sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs + 1, st.num_gates - 8, out);
         save_state(fname, &st, false);
 
         if (max_gates > st.num_gates) {
@@ -945,7 +945,7 @@ int generate_lut_graph() {
           }
         }
         char fname[30];
-        sprintf(fname, "%d-%03" PRIu64 "-%s-lut.state", num_outputs + 1, st.num_luts - 7, out);
+        sprintf(fname, "%d-%03" PRIu64 "-%s-lut.state", num_outputs + 1, st.num_luts - 8, out);
         save_state(fname, &st, true);
 
         if (max_luts > st.num_luts) {
