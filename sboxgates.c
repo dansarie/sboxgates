@@ -1,7 +1,7 @@
 /*
  * Program for finding low gate count implementations of S-boxes.
- * The algorithm is an improved version of the one described in Kwan, Matthew: "Reducing the Gate
- * Count of Bitslice DES." IACR Cryptology ePrint Archive 2000 (2000): 51.
+ * The algorithm used is described in Kwan, Matthew: "Reducing the Gate Count of Bitslice DES."
+ * IACR Cryptology ePrint Archive 2000 (2000): 51.
  *
  * Copyright (c) 2016-2017 Marcus Dansarie
  */
@@ -466,8 +466,11 @@ static inline ttable generate_lut_ttable(const uint8_t function, const ttable in
   uint8_t *in2p = (uint8_t*)(&in2);
   uint8_t *in3p = (uint8_t*)(&in3);
   for (uint8_t i = 0; i < 32; i++) {
-    uint32_t addr = (function << 24) | (in1p[i] << 16) | (in2p[i] << 8) | in3p[i];
-    outp[i] = g_lutlut[addr];
+    uint32_t addr1 = (function << 12) | ((in1p[i] & 0xf) << 8) | ((in2p[i] & 0xf) << 4)
+        | (in3p[i] & 0xf);
+    uint32_t addr2 = (function << 12) | ((in1p[i] & 0xf0) << 4) | (in2p[i] & 0xf0)
+        | ((in3p[i] & 0xf0) >> 4);
+    outp[i] = g_lutlut[addr1] | (g_lutlut[addr2] << 4);
   }
   return out;
 }
@@ -492,6 +495,31 @@ static inline uint64_t add_lut(lut_state *st, const uint8_t function, const ttab
   return st->num_luts - 1;
 }
 
+static inline bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1,
+    const ttable t2, const ttable t3) {
+
+  ttable match = _mm256_setzero_si256();
+  ttable tt1 = ~t1;
+  for (uint8_t i = 0; i < 2; i++) {
+    ttable tt2 = ~t2;
+    for (uint8_t k = 0; k < 2; k++) {
+      ttable tt3 = ~t3;
+      for (uint8_t m = 0; m < 2; m++) {
+        ttable k = tt1 & tt2 & tt3;
+        if (ttable_equals_mask(target & k, k, mask)) {
+          match |= k;
+        } else if (!_mm256_testz_si256(target & k & mask, target & k & mask)) {
+          return false;
+        }
+        tt3 = ~tt3;
+      }
+      tt2 = ~tt2;
+    }
+    tt1 = ~tt1;
+  }
+  return ttable_equals_mask(target, match, mask);
+}
+
 /* Recursively builds a network of 3-bit LUTs. */
 static uint64_t create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
@@ -514,6 +542,9 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
       const ttable tb = st->luts[k].table;
       for (int64_t m = k - 1; m >= 0; m--) {
         const ttable tc = st->luts[m].table;
+        if (!check_3lut_possible(target, mask, ta, tb, tc)) {
+          continue;
+        }
         uint8_t func = 0;
         do {
           ttable nt = generate_lut_ttable(func, ta, tb, tc);
@@ -669,6 +700,7 @@ void print_digraph(const state st) {
 /* Prints the given LUT gate network to stdout in Graphviz dot format. */
 void print_lut_digraph(const lut_state st) {
   printf("digraph sbox {\n");
+  assert(st.num_luts < MAX_GATES);
   for (uint64_t gt = 0; gt < st.num_luts; gt++) {
     char gatename[10];
     if (st.luts[gt].in1 == NO_GATE) {
@@ -748,7 +780,7 @@ static void save_state(const char *name, void *st, bool lut) {
     return;
   }
   size_t size = lut ? sizeof(lut_state) : sizeof(state);
-  if (fwrite(&st, size, 1, fp) != 1) {
+  if (fwrite(st, size, 1, fp) != 1) {
     fprintf(stderr, "File write error.\n");
   }
   fclose(fp);
@@ -850,24 +882,24 @@ void generate_gate_graph() {
 int generate_lut_graph() {
   printf("Creating lookup tables...\n");
   assert(g_lutlut == NULL);
-  g_lutlut = (uint8_t*)malloc(0x100000000 * sizeof(uint8_t));
+  g_lutlut = (uint8_t*)malloc(0x100000 * sizeof(uint8_t));
   if (g_lutlut == NULL) {
-    fprintf(stderr, "Could not allocate 4 GB of memory for the lookup table.\n");
+    fprintf(stderr, "Could not allocate 1 MB of memory for the lookup table.\n");
     return 1;
   }
   for (uint32_t func = 0; func < 256; func++) {
-    for (uint32_t i1 = 0; i1 < 256; i1++) {
-      for (uint32_t i2 = 0; i2 < 256; i2++) {
-        for (uint32_t i3 = 0; i3 < 256; i3++) {
+    for (uint32_t i1 = 0; i1 < 16; i1++) {
+      for (uint32_t i2 = 0; i2 < 16; i2++) {
+        for (uint32_t i3 = 0; i3 < 16; i3++) {
           uint8_t val = 0;
-          for (uint8_t bit = 0; bit < 8; bit++) {
+          for (uint8_t bit = 0; bit < 4; bit++) {
             val = val << 1;
-            uint8_t sel = ((i1 >> (7 - bit)) & 1) << 2;
-            sel |= ((i2 >> (7 - bit)) & 1) << 1;
-            sel |= (i3 >> (7 - bit)) & 1;
+            uint8_t sel = ((i1 >> (3 - bit)) & 1) << 2;
+            sel |= ((i2 >> (3 - bit)) & 1) << 1;
+            sel |= (i3 >> (3 - bit)) & 1;
             val |= (func >> sel) & 1;
           }
-          uint32_t addr = (func << 24) | (i1 << 16) | (i2 << 8) | i3;
+          uint32_t addr = (func << 12) | (i1 << 8) | (i2 << 4) | i3;
           g_lutlut[addr] = val;
         }
       }
@@ -958,7 +990,7 @@ int generate_lut_graph() {
       }
     }
     printf("Found %d state%s with %" PRIu64 " LUTs.\n", num_out_states,
-        num_out_states == 1 ? "" : "s", max_luts);
+        num_out_states == 1 ? "" : "s", max_luts - 8);
     for (uint8_t i = 0; i < num_out_states; i++) {
       start_states[i] = out_states[i];
     }
