@@ -698,6 +698,8 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
       const ttable tb = st->luts[k].table;
       for (int64_t m = k - 1; m >= 0; m--) {
         const ttable tc = st->luts[m].table;
+        bool cache_set = false;
+        ttable cache[256];
         for (int64_t o = m - 1; o >= 0; o--) {
           const ttable td = st->luts[o].table;
           for (int64_t q = o - 1; q >= 0; q--) {
@@ -705,9 +707,15 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
             if (!check_5lut_possible(target, mask, ta, tb, tc, td, te)) {
               continue;
             }
+            if (!cache_set) {
+              for (uint16_t a = 0; a < 256; a++) {
+                cache[a] = generate_lut_ttable(a, ta, tb, tc);
+              }
+              cache_set = true;
+            }
             uint8_t func_outer = 0;
             do {
-              ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+              ttable t_outer = cache[func_outer];
               uint8_t func_inner = 0;
               do {
                 ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
@@ -736,23 +744,39 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
       const ttable tb = st->luts[k].table;
       for (int64_t m = k - 1; m >= 0; m--) {
         const ttable tc = st->luts[m].table;
+        bool outer_cache_set = false;
+        ttable outer_cache[256];
         for (int64_t o = m - 1; o >= 0; o--) {
           const ttable td = st->luts[o].table;
           for (int64_t q = o - 1; q >= 0; q--) {
             const ttable te = st->luts[q].table;
             for (int64_t s = q - 1; s >= 0; s--) {
               const ttable tf = st->luts[s].table;
+              bool middle_cache_set = false;
+              ttable middle_cache[256];
               for (int64_t u = s - 1; u >= 0; u--) {
                 const ttable tg = st->luts[u].table;
                 if (!check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg)) {
                   continue;
                 }
+                if (!outer_cache_set) {
+                  for (uint16_t a = 0; a < 256; a++) {
+                    outer_cache[a] = generate_lut_ttable(a, ta, tb, tc);
+                  }
+                  outer_cache_set = true;
+                }
+                if (!middle_cache_set) {
+                  for (uint16_t a = 0; a < 256; a++) {
+                    middle_cache[a] = generate_lut_ttable(a, td, te, tf);
+                  }
+                  middle_cache_set = true;
+                }
                 uint8_t func_outer = 0;
                 do {
-                  ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+                  ttable t_outer = outer_cache[func_outer];
                   uint8_t func_middle = 0;
                   do {
-                    ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
+                    ttable t_middle = middle_cache[func_middle];
                     uint8_t func_inner = 0;
                     do {
                       ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
