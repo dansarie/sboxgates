@@ -22,7 +22,7 @@
 #define MAX_GATES 500
 #define NO_GATE ((uint64_t)-1)
 
-typedef enum {IN, NOT, AND, OR, XOR} gate_type;
+typedef enum {IN, NOT, AND, OR, XOR, LUT} gate_type;
 
 typedef __m256i ttable; /* 256 bit truth table. */
 
@@ -41,11 +41,12 @@ typedef struct {
 } state;
 
 typedef struct {
+  gate_type type;
   uint8_t function;
   ttable table;
-  uint64_t in1; /* Input 1 to the LUT. NO_GATE for the inputs. */
-  uint64_t in2; /* Input 2 to the LUT. NO_GATE for the inputs. */
-  uint64_t in3; /* Input 3 to the LUT. NO_GATE for the inputs. */
+  uint64_t in1; /* Input 1 to the LUT/gate, or NO_GATE. */
+  uint64_t in2; /* Input 2 to the LUT/gate, or NO_GATE. */
+  uint64_t in3; /* Input 3 to the LUT/gate, or NO_GATE. */
 } lut;
 
 typedef struct {
@@ -381,72 +382,82 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   best.num_gates = 0;
 
   /* Try all input bit orders. */
-#ifdef _OPENMP
-#pragma omp parallel for firstprivate(next_inbits, bitp)
-#endif
   for (int8_t bit = 0; bit < 8; bit++) {
-    /* Check if the current bit number has already been used for selection. */
-    bool skip = false;
-    for (uint8_t i = 0; i < bitp; i++) {
-      if (inbits[i] == bit) {
-        skip = true;
-        break;
+    #ifdef _OPENMP
+    #pragma omp task firstprivate(next_inbits, bitp) shared(best)
+    #endif
+    {
+      /* Check if the current bit number has already been used for selection. */
+      bool skip = false;
+      for (uint8_t i = 0; i < bitp; i++) {
+        if (inbits[i] == bit) {
+          skip = true;
+          break;
+        }
       }
-    }
-    if (skip) {
-      continue;
-    }
+      if (skip) {
+        goto end;
+      }
 
-    next_inbits[bitp] = bit;
-    const ttable fsel = st->gates[bit].table; /* Selection bit. */
+      next_inbits[bitp] = bit;
+      const ttable fsel = st->gates[bit].table; /* Selection bit. */
 
-    if (g_verbosity > 1) {
-      printf("Level %d: Splitting on bit %d.\n", bitp, bit);
-    }
-    state nst_and = *st; /* New state using AND multiplexer. */
-    if (best.num_gates != 0) {
-      nst_and.max_gates = best.num_gates;
-    }
-    uint64_t fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits);
-    uint64_t mux_out_and = NO_GATE;
-    if (fb != NO_GATE) {
-      uint64_t fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
-          next_inbits);
-      uint64_t andg = add_and_gate(&nst_and, fc, bit);
-      mux_out_and = add_xor_gate(&nst_and, fb, andg);
-    }
+      if (g_verbosity > 1) {
+        printf("Level %d: Splitting on bit %d.\n", bitp, bit);
+      }
+      state nst_and = *st; /* New state using AND multiplexer. */
+      if (best.num_gates != 0) {
+        nst_and.max_gates = best.num_gates;
+      }
+      uint64_t fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits);
+      uint64_t mux_out_and = NO_GATE;
+      if (fb != NO_GATE) {
+        uint64_t fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
+            next_inbits);
+        uint64_t andg = add_and_gate(&nst_and, fc, bit);
+        mux_out_and = add_xor_gate(&nst_and, fb, andg);
+      }
 
-    state nst_or = *st; /* New state using OR multiplexer. */
-    if (best.num_gates != 0) {
-      nst_or.max_gates = best.num_gates;
-    }
-    uint64_t fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits);
-    uint64_t mux_out_or = NO_GATE;
-    if (fd != NO_GATE) {
-      uint64_t fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
-          next_inbits);
-      uint64_t org = add_or_gate(&nst_or, fe, bit);
-      mux_out_or = add_xor_gate(&nst_or, fd, org);
-    }
+      state nst_or = *st; /* New state using OR multiplexer. */
+      if (best.num_gates != 0) {
+        nst_or.max_gates = best.num_gates;
+      }
+      uint64_t fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits);
+      uint64_t mux_out_or = NO_GATE;
+      if (fd != NO_GATE) {
+        uint64_t fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
+            next_inbits);
+        uint64_t org = add_or_gate(&nst_or, fe, bit);
+        mux_out_or = add_xor_gate(&nst_or, fd, org);
+      }
 
-    if (mux_out_and == NO_GATE && mux_out_or == NO_GATE) {
-      continue;
-    }
-    uint64_t mux_out;
-    state nnst;
-    if (mux_out_or == NO_GATE || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
-      nnst = nst_and;
-      mux_out = mux_out_and;
-    } else {
-      nnst = nst_or;
-      mux_out = mux_out_or;
-    }
-    assert(ttable_equals_mask(target, nnst.gates[mux_out].table, mask));
-    if (best.num_gates == 0 || nnst.num_gates < best.num_gates) {
-      best = nnst;
-      best.max_gates = st->max_gates;
+      if (mux_out_and == NO_GATE && mux_out_or == NO_GATE) {
+        goto end;
+      }
+      uint64_t mux_out;
+      state nnst;
+      if (mux_out_or == NO_GATE || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
+        nnst = nst_and;
+        mux_out = mux_out_and;
+      } else {
+        nnst = nst_or;
+        mux_out = mux_out_or;
+      }
+      assert(ttable_equals_mask(target, nnst.gates[mux_out].table, mask));
+      #ifdef _OPENMP
+      #pragma omp critical
+      #endif
+      if (best.num_gates == 0 || nnst.num_gates < best.num_gates) {
+        best = nnst;
+        best.max_gates = st->max_gates;
+      }
+      /* Nasty hack to avoid using continue statement inside OpenMP task. */
+      end: mux_out = mux_out;
     }
   }
+  #ifdef _OPENMP
+  #pragma omp taskwait
+  #endif
   if (best.num_gates == 0) {
     return NO_GATE;
   }
@@ -486,6 +497,7 @@ static inline uint64_t add_lut(lut_state *st, const uint8_t function, const ttab
   if (st->num_luts >= st->max_luts) {
     return NO_GATE;
   }
+  st->luts[st->num_luts].type = LUT;
   st->luts[st->num_luts].function = function;
   st->luts[st->num_luts].table = table;
   st->luts[st->num_luts].in1 = in1;
@@ -495,9 +507,26 @@ static inline uint64_t add_lut(lut_state *st, const uint8_t function, const ttab
   return st->num_luts - 1;
 }
 
+static inline uint64_t add_lut_gate(lut_state *st, const gate_type type, const ttable table,
+    const uint64_t in1, const uint64_t in2) {
+  assert(type == NOT || type == AND || type == OR || type == XOR);
+  assert(in1 < st->num_luts);
+  assert(type == NOT || in2 < st->num_luts);
+  if (st->num_luts >= st->max_luts) {
+    return NO_GATE;
+  }
+  st->luts[st->num_luts].type = type;
+  st->luts[st->num_luts].function = 0;
+  st->luts[st->num_luts].table = table;
+  st->luts[st->num_luts].in1 = in1;
+  st->luts[st->num_luts].in2 = in2;
+  st->luts[st->num_luts].in3 = NO_GATE;
+  st->num_luts += 1;
+  return st->num_luts - 1;
+}
+
 static inline bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1,
     const ttable t2, const ttable t3) {
-
   ttable match = _mm256_setzero_si256();
   ttable tt1 = ~t1;
   for (uint8_t i = 0; i < 2; i++) {
@@ -505,11 +534,84 @@ static inline bool check_3lut_possible(const ttable target, const ttable mask, c
     for (uint8_t k = 0; k < 2; k++) {
       ttable tt3 = ~t3;
       for (uint8_t m = 0; m < 2; m++) {
-        ttable k = tt1 & tt2 & tt3;
-        if (ttable_equals_mask(target & k, k, mask)) {
-          match |= k;
-        } else if (!_mm256_testz_si256(target & k & mask, target & k & mask)) {
+        ttable r = tt1 & tt2 & tt3;
+        if (ttable_equals_mask(target & r, r, mask)) {
+          match |= r;
+        } else if (!_mm256_testz_si256(target & r & mask, target & r & mask)) {
           return false;
+        }
+        tt3 = ~tt3;
+      }
+      tt2 = ~tt2;
+    }
+    tt1 = ~tt1;
+  }
+  return ttable_equals_mask(target, match, mask);
+}
+
+static inline bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1,
+    const ttable t2, const ttable t3, const ttable t4, const ttable t5) {
+  ttable match = _mm256_setzero_si256();
+  ttable tt1 = ~t1;
+  for (uint8_t i = 0; i < 2; i++) {
+    ttable tt2 = ~t2;
+    for (uint8_t k = 0; k < 2; k++) {
+      ttable tt3 = ~t3;
+      for (uint8_t m = 0; m < 2; m++) {
+        ttable tt4 = ~t4;
+        for (uint8_t o = 0; o < 2; o++) {
+          ttable tt5 = ~t5;
+          for (uint8_t q = 0; q < 2; q++) {
+            ttable r = tt1 & tt2 & tt3 & tt4 & tt5;
+            if (ttable_equals_mask(target & r, r, mask)) {
+              match |= r;
+            } else if (!_mm256_testz_si256(target & r & mask, target & r & mask)) {
+              return false;
+            }
+            tt5 = ~tt5;
+          }
+          tt4 = ~tt4;
+        }
+        tt3 = ~tt3;
+      }
+      tt2 = ~tt2;
+    }
+    tt1 = ~tt1;
+  }
+  return ttable_equals_mask(target, match, mask);
+}
+
+static inline bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1,
+    const ttable t2, const ttable t3, const ttable t4, const ttable t5, const ttable t6,
+    const ttable t7) {
+  ttable match = _mm256_setzero_si256();
+  ttable tt1 = ~t1;
+  for (uint8_t i = 0; i < 2; i++) {
+    ttable tt2 = ~t2;
+    for (uint8_t k = 0; k < 2; k++) {
+      ttable tt3 = ~t3;
+      for (uint8_t m = 0; m < 2; m++) {
+        ttable tt4 = ~t4;
+        for (uint8_t o = 0; o < 2; o++) {
+          ttable tt5 = ~t5;
+          for (uint8_t q = 0; q < 2; q++) {
+            ttable tt6 = ~t6;
+            for (uint8_t s = 0; s < 2; s++) {
+              ttable tt7 = ~t7;
+              for (uint8_t u = 0; u < 2; u++) {
+                ttable x = tt1 & tt2 & tt3 & tt4 & tt5 & tt6 & tt7;
+                if (ttable_equals_mask(target & x, x, mask)) {
+                  match |= x;
+                } else if (!_mm256_testz_si256(target & x & mask, target & x & mask)) {
+                  return false;
+                }
+                tt7 = ~tt7;
+              }
+              tt6 = ~tt6;
+            }
+            tt5 = ~tt5;
+          }
+          tt4 = ~tt4;
         }
         tt3 = ~tt3;
       }
@@ -524,12 +626,41 @@ static inline bool check_3lut_possible(const ttable target, const ttable mask, c
 static uint64_t create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
 
-  /* Look through the existing circuit. If there is a LUT that produces the desired map, simply
+  /* 1. Look through the existing circuit. If there is a LUT that produces the desired map, simply
      return the ID of that gate. */
 
   for (int64_t i = st->num_luts - 1; i >= 0; i--) {
     if (ttable_equals_mask(target, st->luts[i].table, mask)) {
       return i;
+    }
+  }
+
+  /* 2. If there are any gates whose inverse produces the desired map, append a NOT gate, and
+     return the ID of the NOT gate. */
+
+  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+    if (ttable_equals_mask(target, ~st->luts[i].table, mask)) {
+      return add_lut_gate(st, NOT, ~st->luts[i].table, i, NO_GATE);
+    }
+  }
+
+  /* 3. Look at all pairs of gates in the existing circuit. If they can be combined with a single
+     gate to produce the desired map, add that single gate and return its ID. */
+
+  const ttable mtarget = target & mask;
+  for (int64_t i = st->num_luts -1; i >= 0; i--) {
+    ttable ti = st->luts[i].table & mask;
+    for (int64_t k = i - 1; k >= 0; k--) {
+      ttable tk = st->luts[k].table & mask;
+      if (ttable_equals(mtarget, ti | tk)) {
+  return add_lut_gate(st, OR, st->luts[i].table | st->luts[k].table, i, k);
+      }
+      if (ttable_equals(mtarget, ti & tk)) {
+  return add_lut_gate(st, AND, st->luts[i].table & st->luts[k].table, i, k);
+      }
+      if (ttable_equals(mtarget, ti ^ tk)) {
+  return add_lut_gate(st, XOR, st->luts[i].table ^ st->luts[k].table, i, k);
+      }
     }
   }
 
@@ -557,6 +688,93 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
     }
   }
 
+  /* Look through all combinations of five gates in the circuit. For each combination, check if
+     a combination of two of the possible 256 three bit boolean functions as in LUT(LUT(a,b,c),d,e)
+     produces the desired map. If so, add those LUTs and return the ID of the output LUT. */
+
+  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+    const ttable ta = st->luts[i].table;
+    for (int64_t k = i - 1; k >= 0; k--) {
+      const ttable tb = st->luts[k].table;
+      for (int64_t m = k - 1; m >= 0; m--) {
+        const ttable tc = st->luts[m].table;
+        for (int64_t o = m - 1; o >= 0; o--) {
+          const ttable td = st->luts[o].table;
+          for (int64_t q = o - 1; q >= 0; q--) {
+            const ttable te = st->luts[q].table;
+            if (!check_5lut_possible(target, mask, ta, tb, tc, td, te)) {
+              continue;
+            }
+            uint8_t func_outer = 0;
+            do {
+              ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+              uint8_t func_inner = 0;
+              do {
+                ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
+                if (ttable_equals_mask(target, t_inner, mask)) {
+                  return add_lut(st, func_inner, t_inner, add_lut(st, func_outer, t_outer, i, k, m),
+                      o, q);
+                }
+                func_inner += 1;
+              } while (func_inner != 0);
+              func_outer += 1;
+            } while (func_outer != 0);
+          }
+        }
+      }
+    }
+  }
+
+  /* Look through all combinations of seven gates in the circuit. For each combination, check if
+     a combination of three of the possible 256 three bit boolean functions as in
+     LUT(LUT(a,b,c),LUT(d,e,f),g) produces the desired map. If so, add those LUTs and return the ID
+     of the output LUT. */
+
+  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+    const ttable ta = st->luts[i].table;
+    for (int64_t k = i - 1; k >= 0; k--) {
+      const ttable tb = st->luts[k].table;
+      for (int64_t m = k - 1; m >= 0; m--) {
+        const ttable tc = st->luts[m].table;
+        for (int64_t o = m - 1; o >= 0; o--) {
+          const ttable td = st->luts[o].table;
+          for (int64_t q = o - 1; q >= 0; q--) {
+            const ttable te = st->luts[q].table;
+            for (int64_t s = q - 1; s >= 0; s--) {
+              const ttable tf = st->luts[s].table;
+              for (int64_t u = s - 1; u >= 0; u--) {
+                const ttable tg = st->luts[u].table;
+                if (!check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg)) {
+                  continue;
+                }
+                uint8_t func_outer = 0;
+                do {
+                  ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+                  uint8_t func_middle = 0;
+                  do {
+                    ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
+                    uint8_t func_inner = 0;
+                    do {
+                      ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+                      if (ttable_equals_mask(target, t_inner, mask)) {
+                        return add_lut(st, func_inner, t_inner,
+                            add_lut(st, func_outer, t_outer, i, k, m),
+                            add_lut(st, func_middle, t_middle, o, q, s), u);
+                      }
+                      func_inner += 1;
+                    } while (func_inner != 0);
+                    func_middle += 1;
+                  } while (func_middle != 0);
+                  func_outer += 1;
+                } while (func_outer != 0);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   /* Use the specified input bit to select between two Karnaugh maps. Call this function
      recursively to generate those two maps. */
 
@@ -576,52 +794,66 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
   best.num_luts = 0;
 
   /* Try all input bit orders. */
-#ifdef _OPENMP
-#pragma omp parallel for firstprivate(next_inbits, bitp)
-#endif
   for (int8_t bit = 0; bit < 8; bit++) {
-    /* Check if the current bit number has already been used for selection. */
-    bool skip = false;
-    for (uint8_t i = 0; i < bitp; i++) {
-      if (inbits[i] == bit) {
-        skip = true;
-        break;
+    #ifdef _OPENMP
+    #pragma omp task firstprivate(next_inbits, bitp) shared(best)
+    #endif
+    {
+      /* Check if the current bit number has already been used for selection. */
+      bool skip = false;
+      for (uint8_t i = 0; i < bitp; i++) {
+        if (inbits[i] == bit) {
+          skip = true;
+          break;
+        }
       }
-    }
-    if (skip) {
-      continue;
-    }
+      if (skip) {
+        goto end;
+      }
 
-    next_inbits[bitp] = bit;
-    const ttable fsel = st->luts[bit].table; /* Selection bit. */
+      next_inbits[bitp] = bit;
+      const ttable fsel = st->luts[bit].table; /* Selection bit. */
 
-    if (g_verbosity > 1) {
-      printf("Level %d: Splitting on bit %d.\n", bitp, bit);
-    }
-    lut_state nnst = *st;
-    if (best.num_luts != 0) {
-      nnst.max_luts = best.num_luts;
-    }
-    uint64_t fb = create_lut_circuit(&nnst, target, mask & ~fsel, next_inbits);
-    if (fb == NO_GATE) {
-      continue;
-    }
-    uint64_t fc = create_lut_circuit(&nnst, target, mask & fsel, next_inbits);
-    if (fc == NO_GATE) {
-      continue;
-    }
-    ttable mux_table = generate_lut_ttable(0xac, nnst.luts[bit].table, nnst.luts[fb].table,
-        nnst.luts[fc].table);
-    uint64_t out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
-    if (out == NO_GATE) {
-      continue;
-    }
-    assert(ttable_equals_mask(target, nnst.luts[out].table, mask));
-    if (best.num_luts == 0 || nnst.num_luts < best.num_luts) {
-      best = nnst;
-      best.max_luts = st->max_luts;
+      if (g_verbosity > 1) {
+        printf("Level %d: Splitting on bit %d.\n", bitp, bit);
+      }
+      lut_state nnst = *st;
+      #ifdef _OPENMP
+      #pragma omp critical
+      #endif
+      if (best.num_luts != 0) {
+        nnst.max_luts = best.num_luts;
+      }
+
+      uint64_t fb = create_lut_circuit(&nnst, target, mask & ~fsel, next_inbits);
+      if (fb == NO_GATE) {
+        goto end;
+      }
+      uint64_t fc = create_lut_circuit(&nnst, target, mask & fsel, next_inbits);
+      if (fc == NO_GATE) {
+        goto end;
+      }
+      ttable mux_table = generate_lut_ttable(0xac, nnst.luts[bit].table, nnst.luts[fb].table,
+          nnst.luts[fc].table);
+      uint64_t out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
+      if (out == NO_GATE) {
+        goto end;
+      }
+      assert(ttable_equals_mask(target, nnst.luts[out].table, mask));
+      #ifdef _OPENMP
+      #pragma omp critical
+      #endif
+      if (best.num_luts == 0 || nnst.num_luts < best.num_luts) {
+        best = nnst;
+        best.max_luts = st->max_luts;
+      }
+      /* Nasty hack to avoid using continue statement inside OpenMP task. */
+      end: out = out;
     }
   }
+  #ifdef _OPENMP
+  #pragma omp taskwait
+  #endif
   if (best.num_luts == 0) {
     return NO_GATE;
   }
@@ -703,17 +935,40 @@ void print_lut_digraph(const lut_state st) {
   assert(st.num_luts < MAX_GATES);
   for (uint64_t gt = 0; gt < st.num_luts; gt++) {
     char gatename[10];
-    if (st.luts[gt].in1 == NO_GATE) {
-      sprintf(gatename, "IN %" PRIu64, gt);
-    } else {
-      sprintf(gatename, "0x%02x", st.luts[gt].function);
+    switch (st.luts[gt].type) {
+      case IN:
+  sprintf(gatename, "IN %" PRIu64, gt);
+  break;
+      case NOT:
+  strcpy(gatename, "NOT");
+        break;
+      case AND:
+  strcpy(gatename, "AND");
+  break;
+      case OR:
+  strcpy(gatename, "OR");
+  break;
+      case XOR:
+  strcpy(gatename, "XOR");
+  break;
+      case LUT:
+  sprintf(gatename, "0x%02x", st.luts[gt].function);
+  break;
+      default:
+  assert(0);
     }
     printf("  gt%" PRIu64 " [label=\"%s\"];\n", gt, gatename);
   }
   for (uint64_t gt = 8; gt < st.num_luts; gt++) {
-    printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in1, gt);
-    printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in2, gt);
-    printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in3, gt);
+    if (st.luts[gt].in1 != NO_GATE) {
+      printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in1, gt);
+    }
+    if (st.luts[gt].in2 != NO_GATE) {
+      printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in2, gt);
+    }
+    if (st.luts[gt].in3 != NO_GATE) {
+      printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in3, gt);
+    }
   }
   for (uint8_t i = 0; i < 8; i++) {
     if (st.outputs[i] != NO_GATE) {
@@ -837,7 +1092,15 @@ void generate_gate_graph() {
         state st = start_states[current_state];
         st.max_gates = max_gates;
         const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-        st.outputs[output] = create_circuit(&st, g_target[output], mask, bits);
+        #ifdef _OPENMP
+        #pragma omp parallel
+        #endif
+        {
+          #ifdef _OPENMP
+          #pragma omp single
+          #endif
+          st.outputs[output] = create_circuit(&st, g_target[output], mask, bits);
+        }
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
           continue;
@@ -914,6 +1177,7 @@ int generate_lut_graph() {
   start_states[0].num_luts = 8;
   memset(start_states[0].luts, 0, sizeof(lut) * MAX_GATES);
   for (uint8_t i = 0; i < 8; i++) {
+    start_states[0].luts[i].type = IN;
     start_states[0].luts[i].function = 0;
     start_states[0].luts[i].table = generate_target(i, false);
     start_states[0].luts[i].in1 = NO_GATE;
@@ -957,7 +1221,15 @@ int generate_lut_graph() {
         lut_state st = start_states[current_state];
         st.max_luts = max_luts;
         const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-        st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits);
+        #ifdef _OPENMP
+        #pragma omp parallel
+        #endif
+        {
+          #ifdef _OPENMP
+          #pragma omp single
+          #endif
+          st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits);
+        }
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
           continue;
@@ -1016,7 +1288,7 @@ int main(int argc, char **argv) {
   bool output_dot = false;
   bool output_c = false;
   bool lut_graph = false;
-  char *fname;
+  char *fname = NULL;
   int c;
   while ((c = getopt(argc, argv, "c:d:hlv")) != -1) {
     switch (c) {
