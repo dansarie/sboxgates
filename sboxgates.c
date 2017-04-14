@@ -653,13 +653,13 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
     for (int64_t k = i - 1; k >= 0; k--) {
       ttable tk = st->luts[k].table & mask;
       if (ttable_equals(mtarget, ti | tk)) {
-  return add_lut_gate(st, OR, st->luts[i].table | st->luts[k].table, i, k);
+        return add_lut_gate(st, OR, st->luts[i].table | st->luts[k].table, i, k);
       }
       if (ttable_equals(mtarget, ti & tk)) {
-  return add_lut_gate(st, AND, st->luts[i].table & st->luts[k].table, i, k);
+        return add_lut_gate(st, AND, st->luts[i].table & st->luts[k].table, i, k);
       }
       if (ttable_equals(mtarget, ti ^ tk)) {
-  return add_lut_gate(st, XOR, st->luts[i].table ^ st->luts[k].table, i, k);
+        return add_lut_gate(st, XOR, st->luts[i].table ^ st->luts[k].table, i, k);
       }
     }
   }
