@@ -436,7 +436,8 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       }
       uint64_t mux_out;
       state nnst;
-      if (mux_out_or == NO_GATE || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
+      if (mux_out_or == NO_GATE
+          || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
         nnst = nst_and;
         mux_out = mux_out_and;
       } else {
