@@ -16,7 +16,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <x86intrin.h>
 
@@ -755,9 +755,9 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
      a combination of two of the possible 256 three bit boolean functions as in LUT(LUT(a,b,c),d,e)
      produces the desired map. If so, add those LUTs and return the ID of the output LUT. */
 
-  clock_t before = 0;
+  struct timeval before;
   if (g_verbosity > 2) {
-    before = clock();
+    gettimeofday(&before, NULL);
   }
 
   for (int64_t i = st->num_luts - 1; i >= 0; i--) {
@@ -802,9 +802,12 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
   }
 
   if (g_verbosity > 2) {
-    double millisecs = (clock() - before) * 1000.0 / CLOCKS_PER_SEC;
+    struct timeval after;
+    gettimeofday(&after, NULL);
+    double millisecs = (after.tv_sec - before.tv_sec) * 1000.0
+        + (after.tv_usec - before.tv_usec) / 1000.0;
     printf("5LUT loop num luts: %lu Time: %.1f ms\n", st->num_luts, millisecs);
-    before = clock();
+    gettimeofday(&before, NULL);
   }
 
   /* Look through all combinations of seven gates in the circuit. For each combination, check if
@@ -870,7 +873,10 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
   }
 
   if (g_verbosity > 2) {
-    double millisecs = (clock() - before) * 1000.0 / CLOCKS_PER_SEC;
+    struct timeval after;
+    gettimeofday(&after, NULL);
+    double millisecs = (after.tv_sec - before.tv_sec) * 1000.0
+        + (after.tv_usec - before.tv_usec) / 1000.0;
     printf("7LUT loop num_luts: %lu Time: %.1f ms\n", st->num_luts, millisecs);
   }
 
