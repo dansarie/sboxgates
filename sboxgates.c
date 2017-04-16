@@ -685,10 +685,6 @@ static inline bool check_7lut_possible(const ttable target, const ttable mask, c
   return ttable_equals_mask(target, match, mask);
 }
 
-static inline uint32_t nchoose3(uint32_t n) {
-  return (n * (n - 1) * (n - 2)) / 6;
-}
-
 /* Recursively builds a network of 3-bit LUTs. */
 static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
