@@ -20,40 +20,43 @@
 #include <unistd.h>
 #include <x86intrin.h>
 
+#define MAX_FACTORIAL 200
 #define MAX_GATES 500
-#define NO_GATE ((uint64_t)-1)
+#define NO_GATE ((gatenum)-1)
+#define PRIgatenum PRIu16
 
 typedef enum {IN, NOT, AND, OR, XOR, LUT} gate_type;
 
 typedef __m256i ttable; /* 256 bit truth table. */
+typedef uint16_t gatenum;
 
 typedef struct {
-  gate_type type;
   ttable table;
-  uint64_t in1; /* Input 1 to the gate. NO_GATE for the inputs. */
-  uint64_t in2; /* Input 2 to the gate. NO_GATE for NOT gates and the inputs. */
+  gate_type type;
+  gatenum in1; /* Input 1 to the gate. NO_GATE for the inputs. */
+  gatenum in2; /* Input 2 to the gate. NO_GATE for NOT gates and the inputs. */
 } gate;
 
 typedef struct {
-  uint64_t max_gates;
-  uint64_t num_gates;  /* Current number of gates. */
-  uint64_t outputs[8]; /* Gate number of the respective output gates, or NO_GATE. */
+  gatenum max_gates;
+  gatenum num_gates;  /* Current number of gates. */
+  gatenum outputs[8]; /* Gate number of the respective output gates, or NO_GATE. */
   gate gates[MAX_GATES];
 } state;
 
 typedef struct {
-  gate_type type;
-  uint8_t function;
   ttable table;
-  uint64_t in1; /* Input 1 to the LUT/gate, or NO_GATE. */
-  uint64_t in2; /* Input 2 to the LUT/gate, or NO_GATE. */
-  uint64_t in3; /* Input 3 to the LUT/gate, or NO_GATE. */
+  gate_type type;
+  gatenum in1; /* Input 1 to the LUT/gate, or NO_GATE. */
+  gatenum in2; /* Input 2 to the LUT/gate, or NO_GATE. */
+  gatenum in3; /* Input 3 to the LUT/gate, or NO_GATE. */
+  uint8_t function;
 } lut;
 
 typedef struct {
-  uint64_t max_luts;
-  uint64_t num_luts;   /* Current number of LUTs. */
-  uint64_t outputs[8]; /* LUT number of the respective output LUTs, or NO_GATE. */
+  gatenum max_luts;
+  gatenum num_luts;   /* Current number of LUTs. */
+  gatenum outputs[8]; /* LUT number of the respective output LUTs, or NO_GATE. */
   lut luts[MAX_GATES];
 } lut_state;
 
@@ -114,8 +117,8 @@ static inline bool ttable_equals_mask(const ttable in1, const ttable in2, const 
 
 /* Adds a gate to the state st. Returns the gate id of the added gate. If an input gate is
    equal to NO_GATE (only gid1 in case of a NOT gate), NO_GATE will be returned. */
-static inline uint64_t add_gate(state *st, gate_type type, ttable table, uint64_t gid1,
-    uint64_t gid2) {
+static inline gatenum add_gate(state *st, gate_type type, ttable table, gatenum gid1,
+    gatenum gid2) {
   if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT)) {
     return NO_GATE;
   }
@@ -135,81 +138,81 @@ static inline uint64_t add_gate(state *st, gate_type type, ttable table, uint64_
 
 /* The functions below are all calls to add_gate above added to improve code readability. */
 
-static inline uint64_t add_not_gate(state *st, uint64_t gid) {
+static inline gatenum add_not_gate(state *st, gatenum gid) {
   return add_gate(st, NOT, ~st->gates[gid].table, gid, NO_GATE);
 }
 
-static inline uint64_t add_and_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_and_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_gate(st, AND, st->gates[gid1].table & st->gates[gid2].table, gid1, gid2);
 }
 
-static inline uint64_t add_or_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_or_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_gate(st, OR, st->gates[gid1].table | st->gates[gid2].table, gid1, gid2);
 }
 
-static inline uint64_t add_xor_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_xor_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_gate(st, XOR, st->gates[gid1].table ^ st->gates[gid2].table, gid1, gid2);
 }
 
-static inline uint64_t add_nand_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_nand_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_not_gate(st, add_and_gate(st, gid1, gid2));
 }
 
-static inline uint64_t add_nor_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_nor_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_not_gate(st, add_or_gate(st, gid1, gid2));
 }
 
-static inline uint64_t add_xnor_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_xnor_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_not_gate(st, add_xor_gate(st, gid1, gid2));
 }
 
-static inline uint64_t add_or_not_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_or_not_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_or_gate(st, add_not_gate(st, gid1), gid2);
 }
 
-static inline uint64_t add_and_not_gate(state *st, uint64_t gid1, uint64_t gid2) {
+static inline gatenum add_and_not_gate(state *st, gatenum gid1, gatenum gid2) {
   return add_and_gate(st, add_not_gate(st, gid1), gid2);
 }
 
-static inline uint64_t add_or_3_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_or_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_or_gate(st, add_or_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_and_3_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_and_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_and_gate(st, add_and_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_xor_3_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_xor_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_xor_gate(st, add_xor_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_and_or_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_and_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_or_gate(st, add_and_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_and_xor_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_and_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_xor_gate(st, add_and_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_xor_or_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_xor_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_or_gate(st, add_xor_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_xor_and_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_xor_and_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_and_gate(st, add_xor_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_or_and_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_or_and_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_and_gate(st, add_or_gate(st, gid1, gid2), gid3);
 }
 
-static inline uint64_t add_or_xor_gate(state *st, uint64_t gid1, uint64_t gid2, uint64_t gid3) {
+static inline gatenum add_or_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_xor_gate(st, add_or_gate(st, gid1, gid2), gid3);
 }
 
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
    paper. */
-static uint64_t create_circuit(state *st, const ttable target, const ttable mask,
+static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
 
   /* 1. Look through the existing circuit. If there is a gate that produces the desired map, simply
@@ -410,12 +413,12 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       if (best.num_gates != 0) {
         nst_and.max_gates = best.num_gates;
       }
-      uint64_t fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits);
-      uint64_t mux_out_and = NO_GATE;
+      gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits);
+      gatenum mux_out_and = NO_GATE;
       if (fb != NO_GATE) {
-        uint64_t fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
+        gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
             next_inbits);
-        uint64_t andg = add_and_gate(&nst_and, fc, bit);
+        gatenum andg = add_and_gate(&nst_and, fc, bit);
         mux_out_and = add_xor_gate(&nst_and, fb, andg);
       }
 
@@ -423,19 +426,19 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
       if (best.num_gates != 0) {
         nst_or.max_gates = best.num_gates;
       }
-      uint64_t fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits);
-      uint64_t mux_out_or = NO_GATE;
+      gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits);
+      gatenum mux_out_or = NO_GATE;
       if (fd != NO_GATE) {
-        uint64_t fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
+        gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
             next_inbits);
-        uint64_t org = add_or_gate(&nst_or, fe, bit);
+        gatenum org = add_or_gate(&nst_or, fe, bit);
         mux_out_or = add_xor_gate(&nst_or, fd, org);
       }
 
       if (mux_out_and == NO_GATE && mux_out_or == NO_GATE) {
         goto end;
       }
-      uint64_t mux_out;
+      gatenum mux_out;
       state nnst;
       if (mux_out_or == NO_GATE
           || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
@@ -465,14 +468,14 @@ static uint64_t create_circuit(state *st, const ttable target, const ttable mask
   }
   *st = best;
   if (g_verbosity > 0) {
-    printf("Level: %d Best: %" PRIu64 "\n", bitp, best.num_gates - 1);
+    printf("Level: %d Best: %d\n", bitp, best.num_gates - 1);
   }
   assert(ttable_equals_mask(target, st->gates[st->num_gates - 1].table, mask));
   return st->num_gates - 1;
 }
 
-static inline uint64_t add_lut(lut_state *st, const uint8_t function, const ttable table,
-    const uint64_t in1, const uint64_t in2, const uint64_t in3) {
+static inline gatenum add_lut(lut_state *st, const uint8_t function, const ttable table,
+    const gatenum in1, const gatenum in2, const gatenum in3) {
   if (in1 == NO_GATE || in2 == NO_GATE || in3 == NO_GATE) {
     return NO_GATE;
   }
@@ -492,8 +495,8 @@ static inline uint64_t add_lut(lut_state *st, const uint8_t function, const ttab
   return st->num_luts - 1;
 }
 
-static inline uint64_t add_lut_gate(lut_state *st, const gate_type type, const ttable table,
-    const uint64_t in1, const uint64_t in2) {
+static inline gatenum add_lut_gate(lut_state *st, const gate_type type, const ttable table,
+    const gatenum in1, const gatenum in2) {
   assert(type == NOT || type == AND || type == OR || type == XOR);
   assert(in1 < st->num_luts);
   assert(type == NOT || in2 < st->num_luts);
@@ -686,13 +689,13 @@ static inline bool check_7lut_possible(const ttable target, const ttable mask, c
 }
 
 /* Recursively builds a network of 3-bit LUTs. */
-static uint64_t create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
+static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
 
   /* 1. Look through the existing circuit. If there is a LUT that produces the desired map, simply
      return the ID of that gate. */
 
-  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+  for (int i = st->num_luts - 1; i >= 0; i--) {
     if (ttable_equals_mask(target, st->luts[i].table, mask)) {
       return i;
     }
@@ -701,7 +704,7 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
   /* 2. If there are any gates whose inverse produces the desired map, append a NOT gate, and
      return the ID of the NOT gate. */
 
-  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+  for (int i = st->num_luts - 1; i >= 0; i--) {
     if (ttable_equals_mask(target, ~st->luts[i].table, mask)) {
       return add_lut_gate(st, NOT, ~st->luts[i].table, i, NO_GATE);
     }
@@ -711,9 +714,9 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
      gate to produce the desired map, add that single gate and return its ID. */
 
   const ttable mtarget = target & mask;
-  for (int64_t i = st->num_luts -1; i >= 0; i--) {
+  for (int i = st->num_luts - 1; i >= 0; i--) {
     ttable ti = st->luts[i].table & mask;
-    for (int64_t k = i - 1; k >= 0; k--) {
+    for (int k = i - 1; k >= 0; k--) {
       ttable tk = st->luts[k].table & mask;
       if (ttable_equals(mtarget, ti | tk)) {
         return add_lut_gate(st, OR, st->luts[i].table | st->luts[k].table, i, k);
@@ -730,16 +733,16 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
   /* Look through all combinations of three gates in the circuit. For each combination, check if
      any of the 256 possible three bit boolean functions produces the desired map. If so, add that
      LUT and return the ID. */
-  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+  for (int i = st->num_luts - 1; i >= 0; i--) {
     const ttable ta = st->luts[i].table;
-    for (int64_t k = i - 1; k >= 0; k--) {
+    for (int k = i - 1; k >= 0; k--) {
       const ttable tb = st->luts[k].table;
-      for (int64_t m = k - 1; m >= 0; m--) {
+      for (int m = k - 1; m >= 0; m--) {
         const ttable tc = st->luts[m].table;
         if (!check_3lut_possible(target, mask, ta, tb, tc)) {
           continue;
         }
-        for (uint16_t func = 0; func < 256; func++) {
+        for (int func = 0; func < 256; func++) {
           ttable nt;
           if (!generate_lut_ttable_and_check(func, ta, tb, tc, target, mask, &nt)) {
             continue;
@@ -760,17 +763,17 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
     before = clock();
   }
 
-  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+  for (int i = st->num_luts - 1; i >= 0; i--) {
     const ttable ta = st->luts[i].table;
-    for (int64_t k = i - 1; k >= 0; k--) {
+    for (int k = i - 1; k >= 0; k--) {
       const ttable tb = st->luts[k].table;
-      for (int64_t m = k - 1; m >= 0; m--) {
+      for (int m = k - 1; m >= 0; m--) {
         const ttable tc = st->luts[m].table;
         bool cache_set = false;
         ttable cache[256];
-        for (int64_t o = m - 1; o >= 0; o--) {
+        for (int o = m - 1; o >= 0; o--) {
           const ttable td = st->luts[o].table;
-          for (int64_t q = o - 1; q >= 0; q--) {
+          for (int q = o - 1; q >= 0; q--) {
             const ttable te = st->luts[q].table;
             if (!check_5lut_possible(target, mask, ta, tb, tc, td, te)) {
               continue;
@@ -779,9 +782,9 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
               generate_lut_ttables(ta, tb, tc, cache);
               cache_set = true;
             }
-            for (uint16_t func_outer = 0; func_outer < 256; func_outer++) {
+            for (int func_outer = 0; func_outer < 256; func_outer++) {
               ttable t_outer = cache[func_outer];
-              for (uint16_t func_inner = 0; func_inner < 256; func_inner++) {
+              for (int func_inner = 0; func_inner < 256; func_inner++) {
                 ttable t_inner;
                 if (!generate_lut_ttable_and_check(func_inner, t_outer, td, te, target, mask,
                     &t_inner)) {
@@ -803,7 +806,7 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
 
   if (g_verbosity > 2) {
     double millisecs = (clock() - before) * 1000.0 / CLOCKS_PER_SEC;
-    printf("5LUT loop num luts: %lu Time: %.1f ms\n", st->num_luts, millisecs);
+    printf("5LUT loop num luts: %" PRIgatenum " Time: %.1f ms\n", st->num_luts, millisecs);
     before = clock();
   }
 
@@ -812,23 +815,23 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
      LUT(LUT(a,b,c),LUT(d,e,f),g) produces the desired map. If so, add those LUTs and return the ID
      of the output LUT. */
 
-  for (int64_t i = st->num_luts - 1; i >= 0; i--) {
+  for (int i = st->num_luts - 1; i >= 0; i--) {
     const ttable ta = st->luts[i].table;
-    for (int64_t k = i - 1; k >= 0; k--) {
+    for (int k = i - 1; k >= 0; k--) {
       const ttable tb = st->luts[k].table;
-      for (int64_t m = k - 1; m >= 0; m--) {
+      for (int m = k - 1; m >= 0; m--) {
         const ttable tc = st->luts[m].table;
         bool outer_cache_set = false;
         ttable outer_cache[256];
-        for (int64_t o = m - 1; o >= 0; o--) {
+        for (int o = m - 1; o >= 0; o--) {
           const ttable td = st->luts[o].table;
-          for (int64_t q = o - 1; q >= 0; q--) {
+          for (int q = o - 1; q >= 0; q--) {
             const ttable te = st->luts[q].table;
-            for (int64_t s = q - 1; s >= 0; s--) {
+            for (int s = q - 1; s >= 0; s--) {
               const ttable tf = st->luts[s].table;
               bool middle_cache_set = false;
               ttable middle_cache[256];
-              for (int64_t u = s - 1; u >= 0; u--) {
+              for (int u = s - 1; u >= 0; u--) {
                 const ttable tg = st->luts[u].table;
                 if (!check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg)) {
                   continue;
@@ -841,11 +844,11 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
                   generate_lut_ttables(td, te, tf, middle_cache);
                   middle_cache_set = true;
                 }
-                for (uint16_t func_outer = 0; func_outer < 256; func_outer++) {
+                for (int func_outer = 0; func_outer < 256; func_outer++) {
                   ttable t_outer = outer_cache[func_outer];
-                  for (uint16_t func_middle = 0; func_middle < 256; func_middle++) {
+                  for (int func_middle = 0; func_middle < 256; func_middle++) {
                     ttable t_middle = middle_cache[func_middle];
-                    for (uint16_t func_inner = 0; func_inner < 256; func_inner++) {
+                    for (int func_inner = 0; func_inner < 256; func_inner++) {
                       ttable t_inner;
                       if (!generate_lut_ttable_and_check(func_inner, t_outer, t_middle, tg, target,
                           mask, &t_inner)) {
@@ -871,7 +874,7 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
 
   if (g_verbosity > 2) {
     double millisecs = (clock() - before) * 1000.0 / CLOCKS_PER_SEC;
-    printf("7LUT loop num_luts: %lu Time: %.1f ms\n", st->num_luts, millisecs);
+    printf("7LUT loop num_luts: %" PRIgatenum " Time: %.1f ms\n", st->num_luts, millisecs);
   }
 
   /* Use the specified input bit to select between two Karnaugh maps. Call this function
@@ -924,17 +927,17 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
         nnst.max_luts = best.num_luts;
       }
 
-      uint64_t fb = create_lut_circuit(&nnst, target, mask & ~fsel, next_inbits);
+      gatenum fb = create_lut_circuit(&nnst, target, mask & ~fsel, next_inbits);
       if (fb == NO_GATE) {
         goto end;
       }
-      uint64_t fc = create_lut_circuit(&nnst, target, mask & fsel, next_inbits);
+      gatenum fc = create_lut_circuit(&nnst, target, mask & fsel, next_inbits);
       if (fc == NO_GATE) {
         goto end;
       }
       ttable mux_table = generate_lut_ttable(0xac, nnst.luts[bit].table, nnst.luts[fb].table,
           nnst.luts[fc].table);
-      uint64_t out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
+      gatenum out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
       if (out == NO_GATE) {
         goto end;
       }
@@ -958,7 +961,7 @@ static uint64_t create_lut_circuit(lut_state *st, const ttable target, const tta
   }
   *st = best;
   if (g_verbosity > 0) {
-    printf("Level: %d Best: %" PRIu64 "\n", bitp, best.num_luts - 1);
+    printf("Level: %d Best: %d\n", bitp, best.num_luts - 1);
   }
   assert(ttable_equals_mask(target, st->luts[st->num_luts - 1].table, mask));
   return st->num_luts - 1;
@@ -987,13 +990,13 @@ static ttable generate_target(uint8_t bit, bool sbox) {
 /* Prints the given gate network to stdout in Graphviz dot format. */
 void print_digraph(const state st) {
   printf("digraph sbox {\n");
-    for (uint64_t gt = 0; gt < st.num_gates; gt++) {
+    for (int gt = 0; gt < st.num_gates; gt++) {
       char *gatename;
       char buf[10];
       switch (st.gates[gt].type) {
         case IN:
           gatename = buf;
-          sprintf(buf, "IN %" PRIu64, gt);
+          sprintf(buf, "IN %d", gt);
           break;
         case NOT:
           gatename = "NOT";
@@ -1010,19 +1013,19 @@ void print_digraph(const state st) {
         default:
           assert(false);
       }
-      printf("  gt%" PRIu64 " [label=\"%s\"];\n", gt, gatename);
+      printf("  gt%d [label=\"%s\"];\n", gt, gatename);
     }
-    for (uint64_t gt = 0; gt < st.num_gates; gt++) {
+    for (int gt = 0; gt < st.num_gates; gt++) {
       if (st.gates[gt].in1 != NO_GATE) {
-        printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.gates[gt].in1, gt);
+        printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in1, gt);
       }
       if (st.gates[gt].in2 != NO_GATE) {
-        printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.gates[gt].in2, gt);
+        printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in2, gt);
       }
     }
     for (uint8_t i = 0; i < 8; i++) {
       if (st.outputs[i] != NO_GATE) {
-        printf("  gt%" PRIu64 " -> out%" PRIu8 ";\n", st.outputs[i], i);
+        printf("  gt%" PRIgatenum " -> out%" PRIu8 ";\n", st.outputs[i], i);
       }
     }
   printf("}\n");
@@ -1032,11 +1035,11 @@ void print_digraph(const state st) {
 void print_lut_digraph(const lut_state st) {
   printf("digraph sbox {\n");
   assert(st.num_luts < MAX_GATES);
-  for (uint64_t gt = 0; gt < st.num_luts; gt++) {
+  for (int gt = 0; gt < st.num_luts; gt++) {
     char gatename[10];
     switch (st.luts[gt].type) {
       case IN:
-  sprintf(gatename, "IN %" PRIu64, gt);
+  sprintf(gatename, "IN %d", gt);
   break;
       case NOT:
   strcpy(gatename, "NOT");
@@ -1056,31 +1059,31 @@ void print_lut_digraph(const lut_state st) {
       default:
   assert(0);
     }
-    printf("  gt%" PRIu64 " [label=\"%s\"];\n", gt, gatename);
+    printf("  gt%d [label=\"%s\"];\n", gt, gatename);
   }
-  for (uint64_t gt = 8; gt < st.num_luts; gt++) {
+  for (int gt = 8; gt < st.num_luts; gt++) {
     if (st.luts[gt].in1 != NO_GATE) {
-      printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in1, gt);
+      printf("  gt%" PRIgatenum " -> gt%d;\n", st.luts[gt].in1, gt);
     }
     if (st.luts[gt].in2 != NO_GATE) {
-      printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in2, gt);
+      printf("  gt%" PRIgatenum " -> gt%d;\n", st.luts[gt].in2, gt);
     }
     if (st.luts[gt].in3 != NO_GATE) {
-      printf("  gt%" PRIu64 " -> gt%" PRIu64 ";\n", st.luts[gt].in3, gt);
+      printf("  gt%" PRIgatenum " -> gt%d;\n", st.luts[gt].in3, gt);
     }
   }
   for (uint8_t i = 0; i < 8; i++) {
     if (st.outputs[i] != NO_GATE) {
-      printf("  gt%" PRIu64 " -> out%" PRIu8 ";\n", st.outputs[i], i);
+      printf("  gt%" PRIgatenum " -> out%" PRIu8 ";\n", st.outputs[i], i);
     }
   }
   printf("}\n");
 }
 
 /* Called by print_c_function to get variable names. */
-static bool get_c_variable_name(const state st, const uint64_t gate, char *buf) {
+static bool get_c_variable_name(const state st, const gatenum gate, char *buf) {
   if (gate < 8) {
-    sprintf(buf, "in.b%" PRIu64, gate);
+    sprintf(buf, "in.b%" PRIgatenum, gate);
     return false;
   }
   for (uint8_t i = 0; i < 8; i++) {
@@ -1089,7 +1092,7 @@ static bool get_c_variable_name(const state st, const uint64_t gate, char *buf) 
       return false;
     }
   }
-  sprintf(buf, "var%" PRIu64, gate);
+  sprintf(buf, "var%" PRIgatenum, gate);
   return true;
 }
 
@@ -1098,7 +1101,7 @@ static void print_c_function(const state st) {
   const char TYPE[] = "int ";
   char buf[10];
   printf("__device__ __forceinline__ int s0(eightbits in) {\n");
-  for (uint64_t gate = 8; gate < st.num_gates; gate++) {
+  for (int gate = 8; gate < st.num_gates; gate++) {
     bool ret = get_c_variable_name(st, gate, buf);
     printf("  %s%s = ", ret == true ? TYPE : "", buf);
     get_c_variable_name(st, st.gates[gate].in1, buf);
@@ -1159,7 +1162,7 @@ void generate_gate_graph() {
   /* Build the gate network one output at a time. After every added output, select the gate network
      or network with the least amount of gates and add another. */
   while (1) {
-    uint64_t max_gates = MAX_GATES;
+    gatenum max_gates = MAX_GATES;
     state out_states[8];
     uint8_t num_out_states = 0;
 
@@ -1209,7 +1212,7 @@ void generate_gate_graph() {
         /* Generate a file name and save the gate network to disk. */
         char out[9];
         memset(out, 0, 9);
-        for (uint64_t i = 0; i < st.num_gates; i++) {
+        for (int i = 0; i < st.num_gates; i++) {
           for (uint8_t k = 0; k < 8; k++) {
             if (st.outputs[k] == i) {
               char str[2] = {'0' + k, '\0'};
@@ -1219,7 +1222,7 @@ void generate_gate_graph() {
           }
         }
         char fname[30];
-        sprintf(fname, "%d-%03" PRIu64 "-%s.state", num_outputs + 1, st.num_gates - 8, out);
+        sprintf(fname, "%d-%03d-%s.state", num_outputs + 1, st.num_gates - 8, out);
         save_state(fname, &st, false);
 
         if (max_gates > st.num_gates) {
@@ -1231,7 +1234,7 @@ void generate_gate_graph() {
         }
       }
     }
-    printf("Found %d state%s with %" PRIu64 " gates.\n", num_out_states,
+    printf("Found %d state%s with %" PRIgatenum " gates.\n", num_out_states,
         num_out_states == 1 ? "" : "s", max_gates);
     for (uint8_t i = 0; i < num_out_states; i++) {
       start_states[i] = out_states[i];
@@ -1249,10 +1252,10 @@ int generate_lut_graph() {
     fprintf(stderr, "Could not allocate 1 MB of memory for the lookup table.\n");
     return 1;
   }
-  for (uint32_t func = 0; func < 256; func++) {
-    for (uint32_t i1 = 0; i1 < 16; i1++) {
-      for (uint32_t i2 = 0; i2 < 16; i2++) {
-        for (uint32_t i3 = 0; i3 < 16; i3++) {
+  for (int func = 0; func < 256; func++) {
+    for (int i1 = 0; i1 < 16; i1++) {
+      for (int i2 = 0; i2 < 16; i2++) {
+        for (int i3 = 0; i3 < 16; i3++) {
           uint8_t val = 0;
           for (uint8_t bit = 0; bit < 4; bit++) {
             val = val << 1;
@@ -1261,7 +1264,7 @@ int generate_lut_graph() {
             sel |= (i3 >> (3 - bit)) & 1;
             val |= (func >> sel) & 1;
           }
-          uint32_t addr = (func << 12) | (i1 << 8) | (i2 << 4) | i3;
+          int addr = (func << 12) | (i1 << 8) | (i2 << 4) | i3;
           g_lutlut[addr] = val;
         }
       }
@@ -1288,7 +1291,7 @@ int generate_lut_graph() {
   /* Build the gate network one output at a time. After every added output, select the gate network
      or network with the least amount of gates and add another. */
   while (1) {
-    uint64_t max_luts = MAX_GATES;
+    gatenum max_luts = MAX_GATES;
     lut_state out_states[8];
     uint8_t num_out_states = 0;
 
@@ -1338,8 +1341,8 @@ int generate_lut_graph() {
         /* Generate a file name and save the state to disk. */
         char out[9];
         memset(out, 0, 9);
-        for (uint64_t i = 0; i < st.num_luts; i++) {
-          for (uint8_t k = 0; k < 8; k++) {
+        for (gatenum i = 0; i < st.num_luts; i++) {
+          for (int k = 0; k < 8; k++) {
             if (st.outputs[k] == i) {
               char str[2] = {'0' + k, '\0'};
               strcat(out, str);
@@ -1348,7 +1351,7 @@ int generate_lut_graph() {
           }
         }
         char fname[30];
-        sprintf(fname, "%d-%03" PRIu64 "-%s-lut.state", num_outputs + 1, st.num_luts - 8, out);
+        sprintf(fname, "%d-%03d-%s-lut.state", num_outputs + 1, st.num_luts - 8, out);
         save_state(fname, &st, true);
 
         if (max_luts > st.num_luts) {
@@ -1360,9 +1363,9 @@ int generate_lut_graph() {
         }
       }
     }
-    printf("Found %d state%s with %" PRIu64 " LUTs.\n", num_out_states,
+    printf("Found %d state%s with %d LUTs.\n", num_out_states,
         num_out_states == 1 ? "" : "s", max_luts - 8);
-    for (uint8_t i = 0; i < num_out_states; i++) {
+    for (int i = 0; i < num_out_states; i++) {
       start_states[i] = out_states[i];
     }
     num_start_states = num_out_states;
@@ -1377,7 +1380,7 @@ int generate_lut_graph() {
 int main(int argc, char **argv) {
 
   /* Generate truth tables for all output bits of the target sbox. */
-  for (uint8_t i = 0; i < 8; i++) {
+  for (int i = 0; i < 8; i++) {
     g_target[i] = generate_target(i, true);
   }
 
