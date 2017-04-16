@@ -80,7 +80,6 @@ const uint8_t g_sbox_enc[] = {
 
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 uint8_t g_verbosity = 0;  /* Verbosity level. Higher = more debugging messages. */
-uint8_t *g_lutlut = NULL; /* Lookup table used to calculate truth tables for LUTs faster. */
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -515,80 +514,78 @@ static inline gatenum add_lut_gate(lut_state *st, const gate_type type, const tt
 
 static inline ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
     const ttable in3) {
-  const uint64_t hi = 0xf0f0f0f0f0f0f0f0L;
-  const uint64_t lo = 0x0f0f0f0f0f0f0f0fL;
-  const ttable himask = {hi, hi, hi, hi};
-  const ttable lomask = {lo, lo, lo, lo};
-  const ttable in1hi = in1 & himask;
-  const ttable in1lo = in1 & lomask;
-  const ttable in23lo = ((in2 & lomask) << 4) | (in3 & lomask);
-  const ttable in23hi = (in2 & himask) | _mm256_srli_epi64(in3 & himask, 4);
-  ttable out;
-  uint8_t *outp = (uint8_t*)(&out);
-  uint8_t *in1hip = (uint8_t*)(&in1hi);
-  uint8_t *in1lop = (uint8_t*)(&in1lo);
-  uint8_t *in23lop = (uint8_t*)(&in23lo);
-  uint8_t *in23hip = (uint8_t*)(&in23hi);
-  uint32_t func = function << 12;
-  for (uint8_t i = 0; i < 32; i++) {
-    uint32_t addr1 = func | (in1lop[i] << 8) | in23lop[i];
-    uint32_t addr2 = func | (in1hip[i] << 4) | in23hip[i];
-    outp[i] = g_lutlut[addr1] | (g_lutlut[addr2] << 4);
+  ttable ret = _mm256_setzero_si256();
+  if ((function & 1) != 0) {
+    ret |= ~in1 & ~in2 & ~in3;
   }
-  return out;
-}
-
-static inline bool generate_lut_ttable_and_check(const uint8_t function, const ttable in1,
-    const ttable in2, const ttable in3, const ttable target, const ttable mask, ttable *out) {
-  const uint64_t hi = 0xf0f0f0f0f0f0f0f0L;
-  const uint64_t lo = 0x0f0f0f0f0f0f0f0fL;
-  const ttable himask = {hi, hi, hi, hi};
-  const ttable lomask = {lo, lo, lo, lo};
-  const uint8_t *maskp = (uint8_t*)(&mask);
-  const uint8_t *targetp = (uint8_t*)(&target);
-  const ttable in1hi = in1 & himask;
-  const ttable in1lo = in1 & lomask;
-  const ttable in23lo = ((in2 & lomask) << 4) | (in3 & lomask);
-  const ttable in23hi = (in2 & himask) | _mm256_srli_epi64(in3 & himask, 4);
-  uint8_t *outp = (uint8_t*)out;
-  uint8_t *in1hip = (uint8_t*)(&in1hi);
-  uint8_t *in1lop = (uint8_t*)(&in1lo);
-  uint8_t *in23lop = (uint8_t*)(&in23lo);
-  uint8_t *in23hip = (uint8_t*)(&in23hi);
-  uint32_t func = function << 12;
-  for (uint8_t i = 0; i < 32; i++) {
-    uint32_t addr1 = func | (in1lop[i] << 8) | in23lop[i];
-    uint32_t addr2 = func | (in1hip[i] << 4) | in23hip[i];
-    outp[i] = g_lutlut[addr1] | (g_lutlut[addr2] << 4);
-    if (((outp[i] ^ targetp[i]) & maskp[i]) != 0) {
-      return false;
-    }
+  if ((function & 2) != 0) {
+    ret |= ~in1 & ~in2 & in3;
   }
-  return true;
+  if ((function & 4) != 0) {
+    ret |= ~in1 & in2 & ~in3;
+  }
+  if ((function & 8) != 0) {
+    ret |= ~in1 & in2 & in3;
+  }
+  if ((function & 16) != 0) {
+    ret |= in1 & ~in2 & ~in3;
+  }
+  if ((function & 32) != 0) {
+    ret |= in1 & ~in2 & in3;
+  }
+  if ((function & 64) != 0) {
+    ret |= in1 & in2 & ~in3;
+  }
+  if ((function & 128) != 0) {
+    ret |= in1 & in2 & in3;
+  }
+  return ret;
 }
 
 static inline void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3,
     ttable *out) {
-  const uint64_t hi = 0xf0f0f0f0f0f0f0f0L;
-  const uint64_t lo = 0x0f0f0f0f0f0f0f0fL;
-  const ttable himask = {hi, hi, hi, hi};
-  const ttable lomask = {lo, lo, lo, lo};
-  const ttable in1hi = in1 & himask;
-  const ttable in1lo = in1 & lomask;
-  const ttable in23lo = ((in2 & lomask) << 4) | (in3 & lomask);
-  const ttable in23hi = (in2 & himask) | _mm256_srli_epi64(in3 & himask, 4);
-  uint8_t *outp = (uint8_t*)out;
-  uint8_t *in1hip = (uint8_t*)(&in1hi);
-  uint8_t *in1lop = (uint8_t*)(&in1lo);
-  uint8_t *in23lop = (uint8_t*)(&in23lo);
-  uint8_t *in23hip = (uint8_t*)(&in23hi);
-  for (uint32_t func = 0; func < 256; func++) {
-    for (uint8_t i = 0; i < 32; i++) {
-      uint32_t addr1 = (func << 12) | (in1lop[i] << 8) | in23lop[i];
-      uint32_t addr2 = (func << 12) | (in1hip[i] << 4) | in23hip[i];
-      outp[func * 32 + i] = g_lutlut[addr1] | (g_lutlut[addr2] << 4);
+  for (int func = 0; func < 256; func++) {
+    out[func] = generate_lut_ttable(func, in1, in2, in3);
+  }
+}
+
+static inline bool get_lut_function(const ttable in1, const ttable in2, const ttable in3,
+    const ttable target, const ttable mask, uint8_t *func) {
+  *func = 0;
+  uint8_t tableset = 0;
+
+  uint64_t in1_v[4];
+  uint64_t in2_v[4];
+  uint64_t in3_v[4];
+  uint64_t target_v[4];
+  uint64_t mask_v[4];
+
+  _mm256_storeu_si256((ttable*)in1_v, in1);
+  _mm256_storeu_si256((ttable*)in2_v, in2);
+  _mm256_storeu_si256((ttable*)in3_v, in3);
+  _mm256_storeu_si256((ttable*)target_v, target);
+  _mm256_storeu_si256((ttable*)mask_v, mask);
+
+  for (int v = 0; v < 4; v++) {
+    for (int i = 0; i < 64; i++) {
+      if (mask_v[v] & 1) {
+        uint8_t temp = ((in1_v[v] & 1) << 2) | ((in2_v[v] & 1) << 1) | (in3_v[v] & 1);
+        if ((tableset & (1 << temp)) == 0) {
+          *func |= (target_v[v] & 1) << temp;
+          tableset |= 1 << temp;
+        } else if ((*func & (1 << temp)) != ((target_v[v] & 1) << temp)) {
+          return false;
+        }
+      }
+      target_v[v] >>= 1;
+      mask_v[v] >>= 1;
+      in1_v[v] >>= 1;
+      in2_v[v] >>= 1;
+      in3_v[v] >>= 1;
     }
   }
+
+  return true;
 }
 
 static inline bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1,
@@ -688,6 +685,10 @@ static inline bool check_7lut_possible(const ttable target, const ttable mask, c
   return ttable_equals_mask(target, match, mask);
 }
 
+static inline uint32_t nchoose3(uint32_t n) {
+  return (n * (n - 1) * (n - 2)) / 6;
+}
+
 /* Recursively builds a network of 3-bit LUTs. */
 static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
     const int8_t *inbits) {
@@ -742,14 +743,13 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
         if (!check_3lut_possible(target, mask, ta, tb, tc)) {
           continue;
         }
-        for (int func = 0; func < 256; func++) {
-          ttable nt;
-          if (!generate_lut_ttable_and_check(func, ta, tb, tc, target, mask, &nt)) {
-            continue;
-          }
-          assert(ttable_equals_mask(target, nt, mask));
-          return add_lut(st, func, nt, i, k, m);
+        uint8_t func;
+        if (!get_lut_function(ta, tb, tc, target, mask, &func)) {
+          continue;
         }
+        ttable nt = generate_lut_ttable(func, ta, tb, tc);
+        assert(ttable_equals_mask(target, nt, mask));
+        return add_lut(st, func, nt, i, k, m);
       }
     }
   }
@@ -784,19 +784,17 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
             }
             for (int func_outer = 0; func_outer < 256; func_outer++) {
               ttable t_outer = cache[func_outer];
-              for (int func_inner = 0; func_inner < 256; func_inner++) {
-                ttable t_inner;
-                if (!generate_lut_ttable_and_check(func_inner, t_outer, td, te, target, mask,
-                    &t_inner)) {
-                  continue;
-                }
-                assert(ttable_equals_mask(target, t_inner, mask));
-                if (g_verbosity > 2) {
-                  printf("Found 5LUT!\n");
-                }
-                return add_lut(st, func_inner, t_inner, add_lut(st, func_outer, t_outer, i, k, m),
-                      o, q);
+              uint8_t func_inner;
+              if (!get_lut_function(t_outer, td, te, target, mask, &func_inner)) {
+                continue;
               }
+              ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
+              assert(ttable_equals_mask(target, t_inner, mask));
+              if (g_verbosity > 2) {
+                printf("Found 5LUT!\n");
+              }
+              return add_lut(st, func_inner, t_inner, add_lut(st, func_outer, t_outer, i, k, m),
+                  o, q);
             }
           }
         }
@@ -851,20 +849,18 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
                   ttable t_outer = outer_cache[func_outer];
                   for (int func_middle = 0; func_middle < 256; func_middle++) {
                     ttable t_middle = middle_cache[func_middle];
-                    for (int func_inner = 0; func_inner < 256; func_inner++) {
-                      ttable t_inner;
-                      if (!generate_lut_ttable_and_check(func_inner, t_outer, t_middle, tg, target,
-                          mask, &t_inner)) {
-                        continue;
-                      }
-                      assert(ttable_equals_mask(target, t_inner, mask));
-                      if (g_verbosity > 2) {
-                        printf("Found 7LUT!\n");
-                      }
-                      return add_lut(st, func_inner, t_inner,
-                          add_lut(st, func_outer, t_outer, i, k, m),
-                          add_lut(st, func_middle, t_middle, o, q, s), u);
+                    uint8_t func_inner;
+                    if (!get_lut_function(t_outer, t_middle, tg, target, mask, &func_inner)) {
+                      continue;
                     }
+                    ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+                    assert(ttable_equals_mask(target, t_inner, mask));
+                    if (g_verbosity > 2) {
+                      printf("Found 7LUT!\n");
+                    }
+                    return add_lut(st, func_inner, t_inner,
+                        add_lut(st, func_outer, t_outer, i, k, m),
+                        add_lut(st, func_middle, t_middle, o, q, s), u);
                   }
                 }
               }
@@ -1251,32 +1247,6 @@ void generate_gate_graph() {
 
 /* Called by main to generate a graph of 3-bit LUTs. */
 int generate_lut_graph() {
-  printf("Creating lookup tables...\n");
-  assert(g_lutlut == NULL);
-  g_lutlut = (uint8_t*)malloc(0x100000 * sizeof(uint8_t));
-  if (g_lutlut == NULL) {
-    fprintf(stderr, "Could not allocate 1 MB of memory for the lookup table.\n");
-    return 1;
-  }
-  for (int func = 0; func < 256; func++) {
-    for (int i1 = 0; i1 < 16; i1++) {
-      for (int i2 = 0; i2 < 16; i2++) {
-        for (int i3 = 0; i3 < 16; i3++) {
-          uint8_t val = 0;
-          for (uint8_t bit = 0; bit < 4; bit++) {
-            val = val << 1;
-            uint8_t sel = ((i1 >> (3 - bit)) & 1) << 2;
-            sel |= ((i2 >> (3 - bit)) & 1) << 1;
-            sel |= (i3 >> (3 - bit)) & 1;
-            val |= (func >> sel) & 1;
-          }
-          int addr = (func << 12) | (i1 << 8) | (i2 << 4) | i3;
-          g_lutlut[addr] = val;
-        }
-      }
-    }
-  }
-
   uint8_t num_start_states = 1;
   lut_state start_states[8];
 
@@ -1376,9 +1346,6 @@ int generate_lut_graph() {
     }
     num_start_states = num_out_states;
   }
-
-  free(g_lutlut);
-  g_lutlut = NULL;
 
   return 0;
 }
