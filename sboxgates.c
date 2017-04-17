@@ -13,6 +13,8 @@
 #else
 #warning "Compiling without OpenMP."
 #endif
+#include <msgpack.h>
+#include <msgpack/fbuffer.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +22,9 @@
 #include <unistd.h>
 #include <x86intrin.h>
 
+#define MSGPACK_FORMAT_VERSION 1
+#define MSGPACK_STATE 0
+#define MSGPACK_LUT_STATE 1
 #define MAX_GATES 500
 #define NO_GATE ((gatenum)-1)
 #define PRIgatenum PRIu16
@@ -1299,18 +1304,254 @@ static void print_c_function(const state st) {
   printf("}\n");
 }
 
-/* Saves a state struct to file. */
-static void save_state(const char *name, void *st, bool lut) {
+static void save_state(const char *name, state st) {
+  assert(name != NULL);
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
     fprintf(stderr, "Error opening file for writing.\n");
     return;
   }
-  size_t size = lut ? sizeof(lut_state) : sizeof(state);
-  if (fwrite(st, size, 1, fp) != 1) {
-    fprintf(stderr, "File write error.\n");
+  msgpack_packer pk;
+  msgpack_packer_init(&pk, fp, msgpack_fbuffer_write);
+  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
+  msgpack_pack_int(&pk, MSGPACK_STATE);
+  msgpack_pack_int(&pk, 8); /* Number of inputs. */
+  msgpack_pack_array(&pk, 8); /* Number of outputs. */
+  for (int i = 0; i < 8; i++) {
+    msgpack_pack_int(&pk, st.outputs[i]);
+  }
+  msgpack_pack_array(&pk, st.num_gates * 4);
+  for (int i = 0; i < st.num_gates; i++) {
+    msgpack_pack_bin(&pk, 32);
+    msgpack_pack_bin_body(&pk, &st.gates[i].table, 32);
+    msgpack_pack_int(&pk, st.gates[i].type);
+    msgpack_pack_int(&pk, st.gates[i].in1);
+    msgpack_pack_int(&pk, st.gates[i].in2);
   }
   fclose(fp);
+}
+
+static void save_lut_state(const char *name, lut_state st) {
+  assert(name != NULL);
+  FILE *fp = fopen(name, "w");
+  if (fp == NULL) {
+    fprintf(stderr, "Error opening file for writing.\n");
+    return;
+  }
+  msgpack_packer pk;
+  msgpack_packer_init(&pk, fp, msgpack_fbuffer_write);
+  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
+  msgpack_pack_int(&pk, MSGPACK_LUT_STATE);
+  msgpack_pack_int(&pk, 8); /* Number of inputs. */
+  msgpack_pack_array(&pk, 8); /* Number of outputs. */
+  for (int i = 0; i < 8; i++) {
+    msgpack_pack_int(&pk, st.outputs[i]);
+  }
+  msgpack_pack_array(&pk, st.num_luts * 6);
+  for (int i = 0; i < st.num_luts; i++) {
+    msgpack_pack_bin(&pk, 32);
+    msgpack_pack_bin_body(&pk, &st.luts[i].table, 32);
+    msgpack_pack_int(&pk, st.luts[i].type);
+    msgpack_pack_int(&pk, st.luts[i].in1);
+    msgpack_pack_int(&pk, st.luts[i].in2);
+    msgpack_pack_int(&pk, st.luts[i].in3);
+    msgpack_pack_int(&pk, st.luts[i].function);
+  }
+  fclose(fp);
+}
+
+static int load_state(const char *name, void **return_state) {
+  assert(name != NULL);
+  assert(return_state != NULL);
+  FILE *fp = fopen(name, "r");
+  if (fp == NULL) {
+    fprintf(stderr, "Error opening file: %s\n", name);
+    return -1;
+  }
+  fseek(fp, 0, SEEK_END);
+  size_t fsize = ftell(fp);
+  fseek(fp, 0, SEEK_SET);
+  msgpack_unpacker unp;
+  if (!msgpack_unpacker_init(&unp, fsize)) {
+    return -1;
+  }
+  if (fread(msgpack_unpacker_buffer(&unp), fsize, 1, fp) != 1) {
+    return -1;
+  }
+  fclose(fp);
+  fp = NULL;
+  msgpack_unpacker_buffer_consumed(&unp, fsize);
+
+  msgpack_unpacked und;
+  msgpack_unpacked_init(&und);
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+  int format_version = und.data.via.i64;
+  msgpack_unpacked_destroy(&und);
+  if (format_version != MSGPACK_FORMAT_VERSION) {
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+  int state_type = und.data.via.i64;
+  msgpack_unpacked_destroy(&und);
+  if (state_type != MSGPACK_STATE && state_type != MSGPACK_LUT_STATE) {
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+  int num_inputs = und.data.via.i64;
+  msgpack_unpacked_destroy(&und);
+  if (num_inputs != 8) {
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_ARRAY) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+  int num_outputs = und.data.via.array.size;
+  if (num_outputs != 8) {
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+  gatenum outputs[8];
+  for (int i = 0; i < 8; i++) {
+    if (und.data.via.array.ptr[i].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+      msgpack_unpacked_destroy(&und);
+      msgpack_unpacker_destroy(&unp);
+      return -1;
+    }
+    outputs[i] = und.data.via.array.ptr[i].via.i64;
+  }
+  msgpack_unpacked_destroy(&und);
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_ARRAY) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+  int arraysize = und.data.via.array.size;
+
+  int divisor = state_type == MSGPACK_STATE ? 4 : 6;
+  if (arraysize % divisor != 0 || arraysize / divisor > MAX_GATES) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return -1;
+  }
+  for (int i = 0; i < 8; i++) {
+    if (outputs[i] >= arraysize / divisor && outputs[i] != NO_GATE) {
+      msgpack_unpacked_destroy(&und);
+      msgpack_unpacker_destroy(&unp);
+      return -1;
+    }
+  }
+
+  if (state_type == MSGPACK_STATE) {
+    state st;
+    st.max_gates = MAX_GATES;
+    st.num_gates = arraysize / 4;
+    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
+    for (int i = 0; i < st.num_gates; i++) {
+      if (und.data.via.array.ptr[i * 4].type != MSGPACK_OBJECT_BIN
+          || und.data.via.array.ptr[i * 4].via.bin.size != 32
+          || und.data.via.array.ptr[i * 4 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 4 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 4 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        return -1;
+      }
+      memcpy(&st.gates[i].table, und.data.via.array.ptr[i * 4].via.bin.ptr, 32);
+      st.gates[i].type = und.data.via.array.ptr[i * 4 + 1].via.i64;
+      st.gates[i].in1 = und.data.via.array.ptr[i * 4 + 2].via.i64;
+      st.gates[i].in2 = und.data.via.array.ptr[i * 4 + 3].via.i64;
+      if (st.gates[i].type > ANDNOT
+          || (st.gates[i].type == IN && i >= 8)
+          || (st.gates[i].in1 >= st.num_gates && st.gates[i].in1 != NO_GATE)
+          || (st.gates[i].in2 >= st.num_gates && st.gates[i].in2 != NO_GATE)
+          || (st.gates[i].in1 == NO_GATE && i >= 8)
+          || (st.gates[i].in2 == NO_GATE && i >= 8 && st.gates[i].type != NOT)) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        return -1;
+      }
+    }
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    *return_state = (void*)malloc(sizeof(state));
+    if (*return_state == NULL) {
+      return -1;
+    }
+    memcpy(*return_state, &st, sizeof(state));
+    return MSGPACK_STATE;
+  } else if (state_type == MSGPACK_LUT_STATE) {
+    lut_state st;
+    st.max_luts = MAX_GATES;
+    st.num_luts = arraysize / 6;
+    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
+    for (int i = 0; i < st.num_luts; i++) {
+      if (und.data.via.array.ptr[i * 6].type != MSGPACK_OBJECT_BIN
+          || und.data.via.array.ptr[i * 6].via.bin.size != 32
+          || und.data.via.array.ptr[i * 6 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 4].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 5].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        return -1;
+      }
+      memcpy(&st.luts[i].table, und.data.via.array.ptr[i * 6].via.bin.ptr, 32);
+      st.luts[i].type = und.data.via.array.ptr[i * 6 + 1].via.i64;
+      st.luts[i].in1 = und.data.via.array.ptr[i * 6 + 2].via.i64;
+      st.luts[i].in2 = und.data.via.array.ptr[i * 6 + 3].via.i64;
+      st.luts[i].in3 = und.data.via.array.ptr[i * 6 + 4].via.i64;
+      st.luts[i].function = und.data.via.array.ptr[i * 6 + 5].via.i64;
+      if (st.luts[i].type > ANDNOT
+          || (st.luts[i].type == IN && i >= 8)
+          || (st.luts[i].in1 >= st.num_luts && st.luts[i].in1 != NO_GATE)
+          || (st.luts[i].in2 >= st.num_luts && st.luts[i].in2 != NO_GATE)
+          || (st.luts[i].in3 >= st.num_luts && st.luts[i].in2 != NO_GATE)
+          || (st.luts[i].in1 == NO_GATE && i >= 8)
+          || (st.luts[i].in2 == NO_GATE && i >= 8 && st.luts[i].type != NOT)
+          || (st.luts[i].in3 == NO_GATE && i >= 8 && st.luts[i].type == LUT)) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        return -1;
+      }
+    }
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    *return_state = (void*)malloc(sizeof(lut_state));
+    if (*return_state == NULL) {
+      return -1;
+    }
+    memcpy(*return_state, &st, sizeof(lut_state));
+    return MSGPACK_LUT_STATE;
+  }
+  assert(0);
 }
 
 /* Called by main to generate a graph of standard (NOT, AND, OR, XOR) gates. */
@@ -1393,7 +1634,7 @@ void generate_gate_graph() {
         }
         char fname[30];
         sprintf(fname, "%d-%03d-%s.state", num_outputs + 1, st.num_gates - 8, out);
-        save_state(fname, &st, false);
+        save_state(fname, st);
 
         if (max_gates > st.num_gates) {
           max_gates = st.num_gates;
@@ -1496,7 +1737,7 @@ int generate_lut_graph() {
         }
         char fname[30];
         sprintf(fname, "%d-%03d-%s-lut.state", num_outputs + 1, st.num_luts - 8, out);
-        save_state(fname, &st, true);
+        save_lut_state(fname, st);
 
         if (max_luts > st.num_luts) {
           max_luts = st.num_luts;
@@ -1524,9 +1765,6 @@ int main(int argc, char **argv) {
   for (uint8_t i = 0; i < 8; i++) {
     g_target[i] = generate_target(i, true);
   }
-
-  state loaded_state;
-  lut_state lut_loaded_state;
 
   bool output_dot = false;
   bool output_c = false;
@@ -1571,40 +1809,36 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  void *return_state = NULL;
+  int loaded_state_type = -1;
   if (output_c || output_dot) {
-    FILE *fp = fopen(fname, "r");
-    if (fp == NULL) {
-      fprintf(stderr, "Error opening file: %s\n", fname);
+    loaded_state_type = load_state(fname, &return_state);
+    if (loaded_state_type != MSGPACK_STATE && loaded_state_type != MSGPACK_LUT_STATE) {
+      fprintf(stderr, "Error when reading state file.\n");
       return 1;
     }
-    int read = 0;
-    if (lut_graph) {
-      read = fread(&lut_loaded_state, sizeof(lut_state), 1, fp);
-    } else {
-      read = fread(&loaded_state, sizeof(state), 1, fp);
-    }
-    if (read != 1) {
-      fprintf(stderr, "Error reading file: %s\n", fname);
-      fclose(fp);
-      return 1;
-    }
-    fclose(fp);
   }
 
   if (output_c) {
-    if (lut_graph) {
+    assert(return_state != NULL);
+    if (loaded_state_type == MSGPACK_LUT_STATE) {
       fprintf(stderr, "Outputting LUT graph as C function not supported.\n");
       return 1;
+    } else if (loaded_state_type == MSGPACK_STATE) {
+      print_c_function(*((state*)return_state));
+      return 0;
     }
-    print_c_function(loaded_state);
-    return 0;
+    assert(0);
   }
 
   if (output_dot) {
-    if (lut_graph) {
-      print_lut_digraph(lut_loaded_state);
+    assert(return_state != NULL);
+    if (loaded_state_type == MSGPACK_LUT_STATE) {
+      print_lut_digraph(*((lut_state*)return_state));
+    } else if (loaded_state_type == MSGPACK_STATE) {
+      print_digraph(*((state*)return_state));
     } else {
-      print_digraph(loaded_state);
+      assert(0);
     }
     return 0;
   }
