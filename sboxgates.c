@@ -607,7 +607,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         best.max_gates = st->max_gates;
       }
       /* Nasty hack to avoid using continue statement inside OpenMP task. */
-      end: mux_out = mux_out;
+      end:;
     }
   }
   #ifdef _OPENMP
@@ -1107,7 +1107,7 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
         best.max_luts = st->max_luts;
       }
       /* Nasty hack to avoid using continue statement inside OpenMP task. */
-      end: out = out;
+      end:;
     }
   }
   #ifdef _OPENMP
