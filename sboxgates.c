@@ -20,7 +20,6 @@
 #include <unistd.h>
 #include <x86intrin.h>
 
-#define MAX_FACTORIAL 200
 #define MAX_GATES 500
 #define NO_GATE ((gatenum)-1)
 #define PRIgatenum PRIu16
