@@ -84,7 +84,6 @@ const uint8_t g_sbox_enc[] = {
 
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 uint8_t g_verbosity = 0;  /* Verbosity level. Higher = more debugging messages. */
-bool g_andnot_available = false; /* If ANDNOT gates are available in addition to standard gates. */
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -264,7 +263,7 @@ static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2,
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
    paper. */
 static gatenum create_circuit(state *st, const ttable target, const ttable mask,
-    const int8_t *inbits) {
+    const int8_t *inbits, bool andnot_available) {
 
   /* 1. Look through the existing circuit. If there is a gate that produces the desired map, simply
      return the ID of that gate. */
@@ -301,7 +300,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (ttable_equals(mtarget, ti ^ tk)) {
         return add_xor_gate(st, i, k);
       }
-      if (g_andnot_available) {
+      if (andnot_available) {
         if (ttable_equals_mask(target, ~ti & tk, mask)) {
           return add_andnot_gate(st, i, k);
         }
@@ -335,7 +334,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (ttable_equals_mask(target, ~tk | ti, mask)) {
         return add_or_not_gate(st, k, i);
       }
-      if (!g_andnot_available) {
+      if (!andnot_available) {
         if (ttable_equals_mask(target, ~ti & tk, mask)) {
           return add_and_not_gate(st, i, k);
         }
@@ -426,7 +425,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         if (ttable_equals(mtarget, korm ^ ti)) {
           return add_or_xor_gate(st, k, m, i);
         }
-        if (g_andnot_available) {
+        if (andnot_available) {
           if (ttable_equals(mtarget, ti | (~tk & tm))) {
             return add_andnot_or_gate(st, k, m, i);
           }
@@ -568,11 +567,12 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (best.num_gates != 0) {
         nst_and.max_gates = best.num_gates;
       }
-      gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits);
+      gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits,
+          andnot_available);
       gatenum mux_out_and = NO_GATE;
       if (fb != NO_GATE) {
         gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
-            next_inbits);
+            next_inbits, andnot_available);
         gatenum andg = add_and_gate(&nst_and, fc, bit);
         mux_out_and = add_xor_gate(&nst_and, fb, andg);
       }
@@ -581,11 +581,12 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (best.num_gates != 0) {
         nst_or.max_gates = best.num_gates;
       }
-      gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits);
+      gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits,
+          andnot_available);
       gatenum mux_out_or = NO_GATE;
       if (fd != NO_GATE) {
         gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
-            next_inbits);
+            next_inbits, andnot_available);
         gatenum org = add_or_gate(&nst_or, fe, bit);
         mux_out_or = add_xor_gate(&nst_or, fd, org);
       }
@@ -843,7 +844,7 @@ static inline bool check_7lut_possible(const ttable target, const ttable mask, c
 
 /* Recursively builds a network of 3-bit LUTs. */
 static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
-    const int8_t *inbits) {
+    const int8_t *inbits, bool andnot_available) {
 
   /* 1. Look through the existing circuit. If there is a LUT that produces the desired map, simply
      return the ID of that gate. */
@@ -880,7 +881,7 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
       if (ttable_equals(mtarget, ti ^ tk)) {
         return add_lut_gate(st, XOR, st->luts[i].table ^ st->luts[k].table, i, k);
       }
-      if (g_andnot_available) {
+      if (andnot_available) {
         if (ttable_equals(mtarget, ~ti & tk)) {
           return add_lut_gate(st, ANDNOT, ~st->luts[i].table & st->luts[k].table, i, k);
         }
@@ -1089,11 +1090,11 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
         nnst.max_luts = best.num_luts;
       }
 
-      gatenum fb = create_lut_circuit(&nnst, target, mask & ~fsel, next_inbits);
+      gatenum fb = create_lut_circuit(&nnst, target, mask & ~fsel, next_inbits, andnot_available);
       if (fb == NO_GATE) {
         goto end;
       }
-      gatenum fc = create_lut_circuit(&nnst, target, mask & fsel, next_inbits);
+      gatenum fc = create_lut_circuit(&nnst, target, mask & fsel, next_inbits, andnot_available);
       if (fc == NO_GATE) {
         goto end;
       }
@@ -1555,7 +1556,7 @@ static int load_state(const char *name, void **return_state) {
 }
 
 /* Called by main to generate a graph of standard (NOT, AND, OR, XOR) gates. */
-void generate_gate_graph() {
+void generate_gate_graph(bool andnot_available) {
   uint8_t num_start_states = 1;
   state start_states[8];
   /* Generate the eight input bits. */
@@ -1612,7 +1613,7 @@ void generate_gate_graph() {
           #ifdef _OPENMP
           #pragma omp single
           #endif
-          st.outputs[output] = create_circuit(&st, g_target[output], mask, bits);
+          st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot_available);
         }
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
@@ -1655,7 +1656,7 @@ void generate_gate_graph() {
 }
 
 /* Called by main to generate a graph of 3-bit LUTs. */
-int generate_lut_graph() {
+int generate_lut_graph(bool andnot_available) {
   uint8_t num_start_states = 1;
   lut_state start_states[8];
 
@@ -1715,7 +1716,8 @@ int generate_lut_graph() {
           #ifdef _OPENMP
           #pragma omp single
           #endif
-          st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits);
+          st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits,
+              andnot_available);
         }
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
@@ -1769,6 +1771,7 @@ int main(int argc, char **argv) {
   bool output_dot = false;
   bool output_c = false;
   bool lut_graph = false;
+  bool andnot_available = false;
   char *fname = NULL;
   int c;
   while ((c = getopt(argc, argv, "c:d:hlnv")) != -1) {
@@ -1794,7 +1797,7 @@ int main(int argc, char **argv) {
         lut_graph = true;
         break;
       case 'n':
-        g_andnot_available = true;
+        andnot_available = true;
         break;
       case 'v':
         g_verbosity += 1;
@@ -1845,10 +1848,10 @@ int main(int argc, char **argv) {
 
   if (lut_graph) {
     printf("Generating LUT graph.\n");
-    return generate_lut_graph();
+    return generate_lut_graph(andnot_available);
   } else {
     printf("Generating standard gate graph.\n");
-    generate_gate_graph();
+    generate_gate_graph(andnot_available);
   }
 
   return 0;
