@@ -1361,9 +1361,10 @@ static void save_lut_state(const char *name, lut_state st) {
   fclose(fp);
 }
 
-static int load_state(const char *name, void **return_state) {
+static int load_state(const char *name, state *return_state, lut_state *return_lut_state) {
   assert(name != NULL);
   assert(return_state != NULL);
+  assert(return_lut_state != NULL);
   FILE *fp = fopen(name, "r");
   if (fp == NULL) {
     fprintf(stderr, "Error opening file: %s\n", name);
@@ -1501,11 +1502,7 @@ static int load_state(const char *name, void **return_state) {
     }
     msgpack_unpacked_destroy(&und);
     msgpack_unpacker_destroy(&unp);
-    *return_state = (void*)malloc(sizeof(state));
-    if (*return_state == NULL) {
-      return -1;
-    }
-    memcpy(*return_state, &st, sizeof(state));
+    *return_state = st;
     return MSGPACK_STATE;
   } else if (state_type == MSGPACK_LUT_STATE) {
     lut_state st;
@@ -1545,11 +1542,7 @@ static int load_state(const char *name, void **return_state) {
     }
     msgpack_unpacked_destroy(&und);
     msgpack_unpacker_destroy(&unp);
-    *return_state = (void*)malloc(sizeof(lut_state));
-    if (*return_state == NULL) {
-      return -1;
-    }
-    memcpy(*return_state, &st, sizeof(lut_state));
+    *return_lut_state = st;
     return MSGPACK_LUT_STATE;
   }
   assert(0);
@@ -1812,10 +1805,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  void *return_state = NULL;
+  state return_state;
+  lut_state return_lut_state;
   int loaded_state_type = -1;
   if (output_c || output_dot) {
-    loaded_state_type = load_state(fname, &return_state);
+    loaded_state_type = load_state(fname, &return_state, &return_lut_state);
     if (loaded_state_type != MSGPACK_STATE && loaded_state_type != MSGPACK_LUT_STATE) {
       fprintf(stderr, "Error when reading state file.\n");
       return 1;
@@ -1823,23 +1817,21 @@ int main(int argc, char **argv) {
   }
 
   if (output_c) {
-    assert(return_state != NULL);
     if (loaded_state_type == MSGPACK_LUT_STATE) {
       fprintf(stderr, "Outputting LUT graph as C function not supported.\n");
       return 1;
     } else if (loaded_state_type == MSGPACK_STATE) {
-      print_c_function(*((state*)return_state));
+      print_c_function(return_state);
       return 0;
     }
     assert(0);
   }
 
   if (output_dot) {
-    assert(return_state != NULL);
     if (loaded_state_type == MSGPACK_LUT_STATE) {
-      print_lut_digraph(*((lut_state*)return_state));
+      print_lut_digraph(return_lut_state);
     } else if (loaded_state_type == MSGPACK_STATE) {
-      print_digraph(*((state*)return_state));
+      print_digraph(return_state);
     } else {
       assert(0);
     }
