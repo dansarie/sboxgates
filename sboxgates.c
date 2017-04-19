@@ -1305,8 +1305,74 @@ static void print_c_function(const state st) {
   printf("}\n");
 }
 
-static void save_state(const char *name, state st) {
-  assert(name != NULL);
+static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
+  pt1 = (pt1 >> 7) | (pt1 << 9);
+  pt1 += pt2;
+  pt2 = (pt2 >> 14) | (pt2 << 2);
+  pt1 ^= k1;
+  pt2 ^= pt1;
+  return (((uint32_t)pt1) << 16) | pt2;
+}
+
+/* Generates a simple fingerprint based on the Speck round function. It is meant to be used for
+   creating unique-ish names for the state save file and is not intended to be cryptographically
+   secure by any means. */
+static uint32_t do_fingerprint(void *st, size_t len) {
+  assert(st != NULL);
+  uint16_t fp1 = 0;
+  uint16_t fp2 = 0;
+  uint16_t *ptr = (uint16_t*)st;
+  for (int p = 0; p < len / 2; p++) {
+    uint32_t ct = speck_round(fp1, fp2, ptr[p]);
+    fp1 = ct >> 16;
+    fp2 = ct & 0xffff;
+  }
+  if (len % 2 != 0) {
+    uint32_t ct = speck_round(fp1, fp2, ((uint8_t*)st)[len - 1]);
+    fp1 = ct >> 16;
+    fp2 = ct & 0xffff;
+  }
+  for (int r = 0; r < 22; r++) {
+    uint32_t ct = speck_round(fp1, fp2, 0);
+    fp1 = ct >> 16;
+    fp2 = ct & 0xffff;
+  }
+  return (((uint32_t)fp1) << 16) | fp2;
+}
+
+static uint32_t state_fingerprint(state st) {
+  assert(st.num_gates <= MAX_GATES);
+  /* Zeroize unused memory in the struct. */
+  memset(st.gates + st.num_gates, 0, (MAX_GATES - st.num_gates) * sizeof(gate));
+  return do_fingerprint(&st, sizeof(state));
+}
+
+static uint32_t lut_state_fingerprint(lut_state st) {
+  assert(st.num_luts <= MAX_GATES);
+  /* Zeroize unused memory in the struct. */
+  memset(st.luts + st.num_luts, 0, (MAX_GATES - st.num_luts) * sizeof(lut));
+  return do_fingerprint(&st, sizeof(lut_state));
+}
+
+static void save_state(state st) {
+  /* Generate a string with the output gates present in the state, in the order they were added. */
+  char out[9];
+  int num_outputs = 0;
+  memset(out, 0, 9);
+  for (int i = 0; i < st.num_gates; i++) {
+    for (uint8_t k = 0; k < 8; k++) {
+      if (st.outputs[k] == i) {
+        num_outputs += 1;
+        char str[2] = {'0' + k, '\0'};
+        strcat(out, str);
+        break;
+      }
+    }
+  }
+
+  char name[40];
+  sprintf(name, "%d-%03d-%s-%08x.state", num_outputs, st.num_gates - 8, out, state_fingerprint(st));
+
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
     fprintf(stderr, "Error opening file for writing.\n");
@@ -1332,8 +1398,24 @@ static void save_state(const char *name, state st) {
   fclose(fp);
 }
 
-static void save_lut_state(const char *name, lut_state st) {
-  assert(name != NULL);
+static void save_lut_state(lut_state st) {
+  char out[9];
+  int num_outputs = 0;
+  memset(out, 0, 9);
+  for (int i = 0; i < st.num_luts; i++) {
+    for (uint8_t k = 0; k < 8; k++) {
+      if (st.outputs[k] == i) {
+        num_outputs += 1;
+        char str[2] = {'0' + k, '\0'};
+        strcat(out, str);
+        break;
+      }
+    }
+  }
+  char name[40];
+  sprintf(name, "%d-%03d-%s-%08x-lut.state", num_outputs, st.num_luts - 8, out,
+      lut_state_fingerprint(st));
+
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
     fprintf(stderr, "Error opening file for writing.\n");
@@ -1613,22 +1695,7 @@ void generate_gate_graph(bool andnot_available) {
           continue;
         }
         assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
-
-        /* Generate a file name and save the gate network to disk. */
-        char out[9];
-        memset(out, 0, 9);
-        for (int i = 0; i < st.num_gates; i++) {
-          for (uint8_t k = 0; k < 8; k++) {
-            if (st.outputs[k] == i) {
-              char str[2] = {'0' + k, '\0'};
-              strcat(out, str);
-              break;
-            }
-          }
-        }
-        char fname[30];
-        sprintf(fname, "%d-%03d-%s.state", num_outputs + 1, st.num_gates - 8, out);
-        save_state(fname, st);
+        save_state(st);
 
         if (max_gates > st.num_gates) {
           max_gates = st.num_gates;
@@ -1717,22 +1784,7 @@ int generate_lut_graph(bool andnot_available) {
           continue;
         }
         assert(ttable_equals(g_target[output], st.luts[st.outputs[output]].table));
-
-        /* Generate a file name and save the state to disk. */
-        char out[9];
-        memset(out, 0, 9);
-        for (gatenum i = 0; i < st.num_luts; i++) {
-          for (int k = 0; k < 8; k++) {
-            if (st.outputs[k] == i) {
-              char str[2] = {'0' + k, '\0'};
-              strcat(out, str);
-              break;
-            }
-          }
-        }
-        char fname[30];
-        sprintf(fname, "%d-%03d-%s-lut.state", num_outputs + 1, st.num_luts - 8, out);
-        save_lut_state(fname, st);
+        save_lut_state(st);
 
         if (max_luts > st.num_luts) {
           max_luts = st.num_luts;
