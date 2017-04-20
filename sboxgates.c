@@ -8,13 +8,9 @@
 
 #include <assert.h>
 #include <inttypes.h>
-#ifdef _OPENMP
-#include <omp.h>
-#else
-#warning "Compiling without OpenMP."
-#endif
 #include <msgpack.h>
 #include <msgpack/fbuffer.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -64,6 +60,20 @@ typedef struct {
   lut luts[MAX_GATES];
 } lut_state;
 
+typedef struct {
+  ttable target;
+  ttable mask;
+  union {
+    state *gate;
+    lut_state *lut;
+  } state;
+  int8_t *inbits;
+  bool *done;
+  bool lut;
+  bool andnot_available;
+  uint8_t bit;
+} thread_work;
+
 const uint8_t g_sbox_enc[] = {
     0x9c, 0xf2, 0x14, 0xc1, 0x8e, 0xcb, 0xb2, 0x65, 0x97, 0x7a, 0x60, 0x17, 0x92, 0xf9, 0x78, 0x41,
     0x07, 0x4c, 0x67, 0x6d, 0x66, 0x4a, 0x30, 0x7d, 0x53, 0x9d, 0xb5, 0xbc, 0xc3, 0xca, 0xf1, 0x04,
@@ -84,6 +94,15 @@ const uint8_t g_sbox_enc[] = {
 
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 uint8_t g_verbosity = 0;  /* Verbosity level. Higher = more debugging messages. */
+
+pthread_mutex_t g_worker_mutex;
+pthread_cond_t g_worker_cond;
+int g_available_workers = 0;
+int g_running_threads = 0;
+thread_work *g_thread_work;
+bool g_stop_workers = false;
+
+int g_called = 0;
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -258,6 +277,102 @@ static inline gatenum add_andnot_3_b_gate(state *st, gatenum gid1, gatenum gid2,
 
 static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
   return add_xor_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
+}
+
+static gatenum create_circuit(state *st, const ttable target, const ttable mask,
+    const int8_t *inbits, bool andnot_available);
+
+static inline void create_circuit_split(state *st, const ttable target,
+    const ttable mask, const int8_t *inbits, uint8_t bit, bool andnot_available) {
+  assert(st != NULL);
+  assert(inbits != NULL);
+  assert(bit < 8);
+
+  const ttable fsel = st->gates[bit].table; /* Selection bit. */
+
+  state nst_and = *st; /* New state using AND multiplexer. */
+  gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, inbits, andnot_available);
+  gatenum mux_out_and = NO_GATE;
+  if (fb != NO_GATE) {
+    gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel, inbits,
+        andnot_available);
+    gatenum andg = add_and_gate(&nst_and, fc, bit);
+    mux_out_and = add_xor_gate(&nst_and, fb, andg);
+  }
+
+  state nst_or = *st;
+  gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, inbits, andnot_available);
+  gatenum mux_out_or = NO_GATE;
+  if (fd != NO_GATE) {
+    gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel, inbits,
+        andnot_available);
+    gatenum org = add_or_gate(&nst_or, fe, bit);
+    mux_out_or = add_xor_gate(&nst_or, fd, org);
+  }
+  if (mux_out_and == NO_GATE || mux_out_or == NO_GATE) {
+    memset(st, 0, sizeof(state));
+    return;
+  }
+  gatenum mux_out;
+  state nnst;
+  if (mux_out_or == NO_GATE
+      || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
+    nnst = nst_and;
+    mux_out = mux_out_and;
+  } else {
+    nnst = nst_or;
+    mux_out = mux_out_or;
+  }
+  assert(ttable_equals_mask(target, nnst.gates[mux_out].table, mask));
+  *st = nnst;
+  return;
+}
+
+static inline bool create_circuit_parallel(bool *done, state *st, const ttable target,
+    const ttable mask, int8_t *inbits, uint8_t bit, bool andnot_available) {
+  assert(done != NULL);
+  assert(st != NULL);
+  assert(inbits != NULL);
+  assert(g_available_workers >= 0);
+  *done = false;
+  /* Dirty read. */
+  if (g_available_workers == 0) {
+    create_circuit_split(st, target, mask, inbits, bit, andnot_available);
+    *done = true;
+    return false;
+  }
+  pthread_mutex_lock(&g_worker_mutex);
+  if (g_available_workers > 0) {
+    int threadno = 0;
+    assert(g_thread_work != NULL);
+    while (threadno < g_running_threads && g_thread_work[threadno].done != NULL) {
+      threadno += 1;
+    }
+    assert(threadno != g_running_threads);
+    g_available_workers -= 1;
+
+    /* Declare a local thread_work variable and use memcpy to fill g_thread_work from it to get
+       around a bug in gcc. */
+    thread_work work;
+    work.lut = false;
+    work.done = done;
+    work.state.gate = st;
+    work.target = target;
+    work.mask = mask;
+    work.inbits = inbits;
+    work.bit = bit;
+    work.andnot_available = andnot_available;
+    memcpy(g_thread_work + threadno, &work, sizeof(thread_work));
+
+    pthread_cond_broadcast(&g_worker_cond);
+    pthread_mutex_unlock(&g_worker_mutex);
+    return true;
+  } else {
+    pthread_mutex_unlock(&g_worker_mutex);
+    create_circuit_split(st, target, mask, inbits, bit, andnot_available);
+    *done = true;
+    return false;
+  }
 }
 
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
@@ -525,7 +640,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
      recursively to generate those two maps. */
 
   /* Copy input bits already used to new array to avoid modifying the old one. */
-  int8_t next_inbits[8];
+  int8_t next_inbits[64];
   uint8_t bitp = 0;
   while (bitp < 6 && inbits[bitp] != -1) {
     next_inbits[bitp] = inbits[bitp];
@@ -535,95 +650,72 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   next_inbits[bitp] = -1;
   next_inbits[bitp + 1] = -1;
 
-  state best;
-  best.max_gates = st->max_gates;
-  best.num_gates = 0;
+  bool state_done[8];
+  state new_states[8];
+  memset(new_states, 0, 8 * sizeof(state));
+
+  bool thread_used = false;
 
   /* Try all input bit orders. */
-  for (int8_t bit = 0; bit < 8; bit++) {
-    #ifdef _OPENMP
-    #pragma omp task firstprivate(next_inbits, bitp) shared(best)
-    #endif
-    {
-      /* Check if the current bit number has already been used for selection. */
-      bool skip = false;
-      for (uint8_t i = 0; i < bitp; i++) {
-        if (inbits[i] == bit) {
-          skip = true;
-          break;
-        }
+  for (int bit = 0; bit < 8; bit++) {
+    bool skip = false;
+    for (int i = 0; i < bitp; i++) {
+      if (inbits[i] == bit) {
+        skip = true;
+        break;
       }
-      if (skip) {
-        goto end;
-      }
+    }
+    if (skip) {
+      state_done[bit] = true;
+      continue;
+    }
+    state_done[bit] = false;
+    if (bit != 0) {
+      memcpy(next_inbits + 8 * bit, next_inbits, 8 * sizeof(int8_t));
+    }
+    new_states[bit] = *st;
+    next_inbits[8 * bit + bitp] = bit;
 
-      next_inbits[bitp] = bit;
-      const ttable fsel = st->gates[bit].table; /* Selection bit. */
-
-      if (g_verbosity > 1) {
-        printf("Level %d: Splitting on bit %d.\n", bitp, bit);
-      }
-      state nst_and = *st; /* New state using AND multiplexer. */
-      if (best.num_gates != 0) {
-        nst_and.max_gates = best.num_gates;
-      }
-      gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits,
-          andnot_available);
-      gatenum mux_out_and = NO_GATE;
-      if (fb != NO_GATE) {
-        gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
-            next_inbits, andnot_available);
-        gatenum andg = add_and_gate(&nst_and, fc, bit);
-        mux_out_and = add_xor_gate(&nst_and, fb, andg);
-      }
-
-      state nst_or = *st; /* New state using OR multiplexer. */
-      if (best.num_gates != 0) {
-        nst_or.max_gates = best.num_gates;
-      }
-      gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits,
-          andnot_available);
-      gatenum mux_out_or = NO_GATE;
-      if (fd != NO_GATE) {
-        gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
-            next_inbits, andnot_available);
-        gatenum org = add_or_gate(&nst_or, fe, bit);
-        mux_out_or = add_xor_gate(&nst_or, fd, org);
-      }
-
-      if (mux_out_and == NO_GATE && mux_out_or == NO_GATE) {
-        goto end;
-      }
-      gatenum mux_out;
-      state nnst;
-      if (mux_out_or == NO_GATE
-          || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
-        nnst = nst_and;
-        mux_out = mux_out_and;
-      } else {
-        nnst = nst_or;
-        mux_out = mux_out_or;
-      }
-      assert(ttable_equals_mask(target, nnst.gates[mux_out].table, mask));
-      #ifdef _OPENMP
-      #pragma omp critical
-      #endif
-      if (best.num_gates == 0 || nnst.num_gates < best.num_gates) {
-        best = nnst;
-        best.max_gates = st->max_gates;
-      }
-      /* Nasty hack to avoid using continue statement inside OpenMP task. */
-      end:;
+    if (create_circuit_parallel(state_done + bit, new_states + bit, target, mask,
+        next_inbits + 8 * bit, bit, andnot_available)) {
+      thread_used = true;
     }
   }
-  #ifdef _OPENMP
-  #pragma omp taskwait
-  #endif
+
+  bool alldone = false;
+  int wait = 1;
+  while (thread_used && !alldone) {
+    for (int i = 0; i < 8; i++) {
+      alldone = true;
+      if (!state_done[i]) {
+        alldone = false;
+        break;
+      }
+    }
+    if (!alldone) {
+      usleep(wait);
+      if (wait < 10) {
+        wait *= 2;
+      }
+    }
+  }
+
+  state best;
+  best.num_gates = 0;
+
+  for (int i = 0; i < 8; i++) {
+    if (new_states[i].num_gates == 0) {
+      continue;
+    }
+    if (best.num_gates == 0 || best.num_gates > new_states[i].num_gates) {
+      best = new_states[i];
+    }
+  }
   if (best.num_gates == 0) {
     return NO_GATE;
   }
   *st = best;
-  if (g_verbosity > 0) {
+  if (g_verbosity > 1) {
     printf("Level: %d Best: %d\n", bitp, best.num_gates - 1);
   }
   assert(ttable_equals_mask(target, st->gates[st->num_gates - 1].table, mask));
@@ -697,6 +789,89 @@ static inline ttable generate_lut_ttable(const uint8_t function, const ttable in
     ret |= in1 & in2 & in3;
   }
   return ret;
+}
+
+static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
+    const int8_t *inbits, bool andnot_available);
+
+static inline void create_lut_circuit_split(lut_state *st, const ttable target,
+    const ttable mask, const int8_t *inbits, uint8_t bit, bool andnot_available) {
+  assert(st != NULL);
+  assert(inbits != NULL);
+  assert(bit < 8);
+
+  const ttable fsel = st->luts[bit].table; /* Selection bit. */
+  lut_state nnst = *st;
+
+  gatenum fb = create_lut_circuit(&nnst, target, mask & ~fsel, inbits, andnot_available);
+  if (fb == NO_GATE) {
+    memset(st, 0, sizeof(lut_state));
+    return;
+  }
+
+  gatenum fc = create_lut_circuit(&nnst, target, mask & fsel, inbits, andnot_available);
+  if (fc == NO_GATE) {
+    memset(st, 0, sizeof(lut_state));
+    return;
+  }
+
+  ttable mux_table = generate_lut_ttable(0xac, nnst.luts[bit].table, nnst.luts[fb].table,
+      nnst.luts[fc].table);
+  gatenum out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
+  if (out == NO_GATE) {
+    memset(st, 0, sizeof(lut_state));
+    return;
+  }
+  assert(ttable_equals_mask(target, nnst.luts[out].table, mask));
+  *st = nnst;
+  return;
+}
+
+static inline bool create_lut_circuit_parallel(bool *done, lut_state *st, const ttable target,
+    const ttable mask, int8_t *inbits, uint8_t bit, bool andnot_available) {
+  assert(done != NULL);
+  assert(st != NULL);
+  assert(inbits != NULL);
+  assert(g_available_workers >= 0);
+  *done = false;
+  /* Dirty read. */
+  if (g_available_workers == 0) {
+    create_lut_circuit_split(st, target, mask, inbits, bit, andnot_available);
+    *done = true;
+    return false;
+  }
+  pthread_mutex_lock(&g_worker_mutex);
+  if (g_available_workers > 0) {
+    int threadno = 0;
+    assert(g_thread_work != NULL);
+    while (threadno < g_running_threads && g_thread_work[threadno].done != NULL) {
+      threadno += 1;
+    }
+    assert(threadno != g_running_threads);
+    g_available_workers -= 1;
+
+    /* Declare a local thread_work variable and use memcpy to fill g_thread_work from it to get
+       around a bug in gcc. */
+    thread_work work;
+    work.lut = true;
+    work.done = done;
+    work.state.lut = st;
+    work.target = target;
+    work.mask = mask;
+    work.inbits = inbits;
+    work.bit = bit;
+    work.andnot_available = andnot_available;
+    memcpy(g_thread_work + threadno, &work, sizeof(thread_work));
+
+    pthread_cond_broadcast(&g_worker_cond);
+    pthread_mutex_unlock(&g_worker_mutex);
+    return true;
+  } else {
+    pthread_mutex_unlock(&g_worker_mutex);
+    create_lut_circuit_split(st, target, mask, inbits, bit, andnot_available);
+    *done = true;
+    return false;
+  }
 }
 
 static inline void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3,
@@ -1044,7 +1219,7 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
      recursively to generate those two maps. */
 
   /* Copy input bits already used to new array to avoid modifying the old one. */
-  int8_t next_inbits[8];
+  int8_t next_inbits[64];
   uint8_t bitp = 0;
   while (bitp < 6 && inbits[bitp] != -1) {
     next_inbits[bitp] = inbits[bitp];
@@ -1054,76 +1229,72 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
   next_inbits[bitp] = -1;
   next_inbits[bitp + 1] = -1;
 
-  lut_state best;
-  best.max_luts = st->max_luts;
-  best.num_luts = 0;
+  bool state_done[8];
+  lut_state new_states[8];
+  memset(new_states, 0, 8 * sizeof(lut_state));
+
+  bool thread_used = false;
 
   /* Try all input bit orders. */
   for (int8_t bit = 0; bit < 8; bit++) {
-    #ifdef _OPENMP
-    #pragma omp task firstprivate(next_inbits, bitp) shared(best)
-    #endif
-    {
-      /* Check if the current bit number has already been used for selection. */
-      bool skip = false;
-      for (uint8_t i = 0; i < bitp; i++) {
-        if (inbits[i] == bit) {
-          skip = true;
-          break;
-        }
+    /* Check if the current bit number has already been used for selection. */
+    bool skip = false;
+    for (uint8_t i = 0; i < bitp; i++) {
+      if (inbits[i] == bit) {
+        skip = true;
+        break;
       }
-      if (skip) {
-        goto end;
-      }
-
-      next_inbits[bitp] = bit;
-      const ttable fsel = st->luts[bit].table; /* Selection bit. */
-
-      if (g_verbosity > 1) {
-        printf("Level %d: Splitting on bit %d.\n", bitp, bit);
-      }
-      lut_state nnst = *st;
-      #ifdef _OPENMP
-      #pragma omp critical
-      #endif
-      if (best.num_luts != 0) {
-        nnst.max_luts = best.num_luts;
-      }
-
-      gatenum fb = create_lut_circuit(&nnst, target, mask & ~fsel, next_inbits, andnot_available);
-      if (fb == NO_GATE) {
-        goto end;
-      }
-      gatenum fc = create_lut_circuit(&nnst, target, mask & fsel, next_inbits, andnot_available);
-      if (fc == NO_GATE) {
-        goto end;
-      }
-      ttable mux_table = generate_lut_ttable(0xac, nnst.luts[bit].table, nnst.luts[fb].table,
-          nnst.luts[fc].table);
-      gatenum out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
-      if (out == NO_GATE) {
-        goto end;
-      }
-      assert(ttable_equals_mask(target, nnst.luts[out].table, mask));
-      #ifdef _OPENMP
-      #pragma omp critical
-      #endif
-      if (best.num_luts == 0 || nnst.num_luts < best.num_luts) {
-        best = nnst;
-        best.max_luts = st->max_luts;
-      }
-      /* Nasty hack to avoid using continue statement inside OpenMP task. */
-      end:;
+    }
+    if (skip) {
+      state_done[bit] = true;
+      continue;
+    }
+    state_done[bit] = false;
+    if (bit != 0) {
+      memcpy(next_inbits + 8 * bit, next_inbits, 8 * sizeof(int8_t));
+    }
+    new_states[bit] = *st;
+    next_inbits[8 * bit + bitp] = bit;
+    if (create_lut_circuit_parallel(state_done + bit, new_states + bit, target, mask,
+        next_inbits + 8 * bit, bit, andnot_available)) {
+      thread_used = true;
     }
   }
-  #ifdef _OPENMP
-  #pragma omp taskwait
-  #endif
+
+  bool alldone = false;
+  int wait = 1;
+  while (thread_used && !alldone) {
+    for (int i = 0; i < 8; i++) {
+      alldone = true;
+      if (!state_done[i]) {
+        alldone = false;
+        break;
+      }
+    }
+    if (!alldone) {
+      usleep(wait);
+      if (wait < 10) {
+        wait *= 2;
+      }
+    }
+  }
+
+  lut_state best;
+  best.num_luts = 0;
+
+  for (int i = 0; i < 8; i++) {
+    if (new_states[i].num_luts == 0) {
+      continue;
+    }
+    if (best.num_luts == 0 || best.num_luts > new_states[i].num_luts) {
+      best = new_states[i];
+    }
+  }
   if (best.num_luts == 0) {
     return NO_GATE;
   }
   *st = best;
-  if (g_verbosity > 0) {
+  if (g_verbosity > 1) {
     printf("Level: %d Best: %d\n", bitp, best.num_luts - 1);
   }
   assert(ttable_equals_mask(target, st->luts[st->num_luts - 1].table, mask));
@@ -1681,15 +1852,7 @@ void generate_gate_graph(bool andnot_available) {
         state st = start_states[current_state];
         st.max_gates = max_gates;
         const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-        #ifdef _OPENMP
-        #pragma omp parallel
-        #endif
-        {
-          #ifdef _OPENMP
-          #pragma omp single
-          #endif
-          st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot_available);
-        }
+        st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot_available);
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
           continue;
@@ -1769,16 +1932,8 @@ int generate_lut_graph(bool andnot_available) {
         lut_state st = start_states[current_state];
         st.max_luts = max_luts;
         const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-        #ifdef _OPENMP
-        #pragma omp parallel
-        #endif
-        {
-          #ifdef _OPENMP
-          #pragma omp single
-          #endif
-          st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits,
-              andnot_available);
-        }
+        st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits,
+            andnot_available);
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
           continue;
@@ -1804,6 +1959,47 @@ int generate_lut_graph(bool andnot_available) {
   }
 
   return 0;
+}
+
+void *worker_thread(void *arg) {
+  pthread_mutex_lock(&g_worker_mutex);
+  int threadno = g_running_threads++;
+  g_available_workers += 1;
+  while (!g_stop_workers) {
+    while (g_thread_work[threadno].done == NULL) {
+      pthread_cond_wait(&g_worker_cond, &g_worker_mutex);
+      if (g_stop_workers) {
+        pthread_mutex_unlock(&g_worker_mutex);
+        return NULL;
+      }
+    }
+    /* Declare a local thread_work variable and use memcpy to fill it with data from g_thread_work
+       to get around a bug in gcc. */
+    thread_work work;
+    memcpy(&work, g_thread_work + threadno, sizeof(thread_work));
+    if (g_verbosity > 0) {
+      printf("[%d] Starting work. Bit: %d\n", threadno, work.bit);
+    }
+    pthread_mutex_unlock(&g_worker_mutex);
+    if (work.lut) {
+      create_lut_circuit_split(work.state.lut, work.target, work.mask, work.inbits, work.bit,
+          work.andnot_available);
+    } else {
+      create_circuit_split(work.state.gate, work.target, work.mask, work.inbits, work.bit,
+          work.andnot_available);
+    }
+    if (g_verbosity > 0) {
+      printf("[%d] Done.\n", threadno);
+    }
+    pthread_mutex_lock(&g_worker_mutex);
+    *work.done = true;
+    g_available_workers += 1;
+    memset(g_thread_work + threadno, 0, sizeof(thread_work));
+  }
+  g_running_threads -= 1;
+  g_available_workers -= 1;
+  pthread_mutex_unlock(&g_worker_mutex);
+  return NULL;
 }
 
 int main(int argc, char **argv) {
@@ -1890,6 +2086,20 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  int numproc = sysconf(_SC_NPROCESSORS_ONLN) - 1;
+  pthread_mutex_init(&g_worker_mutex, NULL);
+  pthread_cond_init(&g_worker_cond, NULL);
+  g_thread_work = (thread_work*)calloc(numproc, sizeof(thread_work));
+  assert(g_thread_work != NULL);
+  pthread_t thread[numproc];
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 0x800000);
+  for (int i = 0; i < numproc; i++) {
+    pthread_create(thread + i, &attr, worker_thread, NULL);
+  }
+  pthread_attr_destroy(&attr);
+
   if (lut_graph) {
     printf("Generating LUT graph.\n");
     return generate_lut_graph(andnot_available);
@@ -1897,6 +2107,18 @@ int main(int argc, char **argv) {
     printf("Generating standard gate graph.\n");
     generate_gate_graph(andnot_available);
   }
+
+  g_stop_workers = true;
+  pthread_cond_broadcast(&g_worker_cond);
+
+  for (int i = 0; i < numproc; i++) {
+    void *ptr;
+    pthread_join(thread[i], &ptr);
+  }
+
+  free(g_thread_work);
+  pthread_cond_destroy(&g_worker_cond);
+  pthread_mutex_destroy(&g_worker_mutex);
 
   return 0;
 }
