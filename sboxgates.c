@@ -9,14 +9,28 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <msgpack.h>
-#include <msgpack/fbuffer.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
 #include <x86intrin.h>
+
+#ifdef USE_MPI
+#include <mpi.h>
+#include <sys/resource.h>
+
+#define TAG_REQUEST 0
+#define TAG_STOP 1
+#define TAG_GET_AVAIL 2
+#define TAG_RET_AVAIL 3
+#define TAG_IS_AVAIL 4
+#define TAG_START 5
+#define TAG_STATE 1000
+#define MIN_BITP 4
+#else
+#include <pthread.h>
+#endif
 
 #define MSGPACK_FORMAT_VERSION 1
 #define MSGPACK_STATE 0
@@ -60,6 +74,7 @@ typedef struct {
   lut luts[MAX_GATES];
 } lut_state;
 
+#ifndef USE_MPI
 typedef struct {
   ttable target;
   ttable mask;
@@ -67,12 +82,14 @@ typedef struct {
     state *gate;
     lut_state *lut;
   } state;
+  gatenum *output;
   int8_t *inbits;
   bool *done;
   bool lut;
   bool andnot_available;
   uint8_t bit;
 } thread_work;
+#endif
 
 const uint8_t g_sbox_enc[] = {
     0x9c, 0xf2, 0x14, 0xc1, 0x8e, 0xcb, 0xb2, 0x65, 0x97, 0x7a, 0x60, 0x17, 0x92, 0xf9, 0x78, 0x41,
@@ -95,14 +112,16 @@ const uint8_t g_sbox_enc[] = {
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 uint8_t g_verbosity = 0;  /* Verbosity level. Higher = more debugging messages. */
 
+#ifndef USE_MPI
 pthread_mutex_t g_worker_mutex;
 pthread_cond_t g_worker_cond;
 int g_available_workers = 0;
 int g_running_threads = 0;
 thread_work *g_thread_work;
 bool g_stop_workers = false;
-
-int g_called = 0;
+#else
+int g_next_return_tag = 1000;
+#endif
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -282,7 +301,7 @@ static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2,
 static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     const int8_t *inbits, bool andnot_available);
 
-static inline void create_circuit_split(state *st, const ttable target,
+static inline gatenum create_circuit_split(state *st, const ttable target,
     const ttable mask, const int8_t *inbits, uint8_t bit, bool andnot_available) {
   assert(st != NULL);
   assert(inbits != NULL);
@@ -300,7 +319,10 @@ static inline void create_circuit_split(state *st, const ttable target,
     mux_out_and = add_xor_gate(&nst_and, fb, andg);
   }
 
-  state nst_or = *st;
+  state nst_or = *st; /* New state using OR multiplexer. */
+  if (mux_out_and != NO_GATE) {
+    nst_or.max_gates = nst_and.num_gates;
+  }
   gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, inbits, andnot_available);
   gatenum mux_out_or = NO_GATE;
   if (fd != NO_GATE) {
@@ -309,10 +331,10 @@ static inline void create_circuit_split(state *st, const ttable target,
     gatenum org = add_or_gate(&nst_or, fe, bit);
     mux_out_or = add_xor_gate(&nst_or, fd, org);
   }
-  if (mux_out_and == NO_GATE || mux_out_or == NO_GATE) {
-    memset(st, 0, sizeof(state));
-    return;
+  if (mux_out_and == NO_GATE && mux_out_or == NO_GATE) {
+    return NO_GATE;
   }
+  nst_or.max_gates = st->max_gates;
   gatenum mux_out;
   state nnst;
   if (mux_out_or == NO_GATE
@@ -325,19 +347,164 @@ static inline void create_circuit_split(state *st, const ttable target,
   }
   assert(ttable_equals_mask(target, nnst.gates[mux_out].table, mask));
   *st = nnst;
-  return;
+  return mux_out;
 }
 
-static inline bool create_circuit_parallel(bool *done, state *st, const ttable target,
-    const ttable mask, int8_t *inbits, uint8_t bit, bool andnot_available) {
+static size_t serialize_state(state st, uint8_t **ret) {
+  assert(ret != NULL);
+  msgpack_sbuffer sbuf;
+  msgpack_packer pk;
+  msgpack_sbuffer_init(&sbuf);
+  msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
+  msgpack_pack_int(&pk, MSGPACK_STATE);
+  msgpack_pack_int(&pk, st.max_gates);
+  msgpack_pack_int(&pk, 8); /* Number of inputs. */
+  msgpack_pack_array(&pk, 8); /* Number of outputs. */
+  for (int i = 0; i < 8; i++) {
+    msgpack_pack_int(&pk, st.outputs[i]);
+  }
+  msgpack_pack_array(&pk, st.num_gates * 4);
+  for (int i = 0; i < st.num_gates; i++) {
+    assert(st.gates[i].type <= ANDNOT);
+    msgpack_pack_bin(&pk, 32);
+    msgpack_pack_bin_body(&pk, &st.gates[i].table, 32);
+    msgpack_pack_int(&pk, st.gates[i].type);
+    msgpack_pack_int(&pk, st.gates[i].in1);
+    msgpack_pack_int(&pk, st.gates[i].in2);
+  }
+  *ret = (uint8_t*)malloc(sbuf.size);
+  assert(*ret != NULL);
+  memcpy(*ret, sbuf.data, sbuf.size);
+  size_t size = sbuf.size;
+  msgpack_sbuffer_destroy(&sbuf);
+  return size;
+}
+
+static size_t serialize_lut_state(lut_state st, uint8_t **ret) {
+  assert(ret != NULL);
+  msgpack_sbuffer sbuf;
+  msgpack_packer pk;
+  msgpack_sbuffer_init(&sbuf);
+  msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
+  msgpack_pack_int(&pk, MSGPACK_LUT_STATE);
+  msgpack_pack_int(&pk, st.max_luts);
+  msgpack_pack_int(&pk, 8); /* Number of inputs. */
+  msgpack_pack_array(&pk, 8); /* Number of outputs. */
+  for (int i = 0; i < 8; i++) {
+    msgpack_pack_int(&pk, st.outputs[i]);
+  }
+  msgpack_pack_array(&pk, st.num_luts * 6);
+  for (int i = 0; i < st.num_luts; i++) {
+    msgpack_pack_bin(&pk, 32);
+    msgpack_pack_bin_body(&pk, &st.luts[i].table, 32);
+    msgpack_pack_int(&pk, st.luts[i].type);
+    msgpack_pack_int(&pk, st.luts[i].in1);
+    msgpack_pack_int(&pk, st.luts[i].in2);
+    msgpack_pack_int(&pk, st.luts[i].in3);
+    msgpack_pack_int(&pk, st.luts[i].function);
+  }
+  *ret = (uint8_t*)malloc(sbuf.size);
+  assert(*ret != NULL);
+  memcpy(*ret, sbuf.data, sbuf.size);
+  size_t size = sbuf.size;
+  msgpack_sbuffer_destroy(&sbuf);
+  return size;
+}
+
+static size_t serialize_request(uint8_t **ret, const ttable target, const ttable mask,
+    const int8_t *inbits, uint8_t bit, bool andnot_available, int return_tag) {
+  assert(ret != NULL);
+  assert(inbits != NULL);
+  msgpack_sbuffer sbuf;
+  msgpack_packer pk;
+  msgpack_sbuffer_init(&sbuf);
+  msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+  msgpack_pack_bin(&pk, 32);
+  msgpack_pack_bin_body(&pk, &target, 32);
+  msgpack_pack_bin(&pk, 32);
+  msgpack_pack_bin_body(&pk, &mask, 32);
+  msgpack_pack_array(&pk, 8);
+  for (int i = 0; i < 8; i++) {
+    msgpack_pack_int(&pk, inbits[i]);
+  }
+  msgpack_pack_int(&pk, bit);
+  if (andnot_available) {
+    msgpack_pack_true(&pk);
+  } else {
+    msgpack_pack_false(&pk);
+  }
+  msgpack_pack_int(&pk, return_tag);
+
+  *ret = (uint8_t*)malloc(sbuf.size);
+  assert(*ret != NULL);
+  memcpy(*ret, sbuf.data, sbuf.size);
+  msgpack_sbuffer_destroy(&sbuf);
+  return sbuf.size;
+}
+
+static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
+  pt1 = (pt1 >> 7) | (pt1 << 9);
+  pt1 += pt2;
+  pt2 = (pt2 >> 14) | (pt2 << 2);
+  pt1 ^= k1;
+  pt2 ^= pt1;
+  return (((uint32_t)pt1) << 16) | pt2;
+}
+
+/* Generates a simple fingerprint based on the Speck round function. It is meant to be used for
+   creating unique-ish names for the state save file and is not intended to be cryptographically
+   secure by any means. */
+static uint32_t do_fingerprint(void *st, size_t len) {
+  assert(st != NULL);
+  uint16_t fp1 = 0;
+  uint16_t fp2 = 0;
+  uint16_t *ptr = (uint16_t*)st;
+  for (int p = 0; p < len / 2; p++) {
+    uint32_t ct = speck_round(fp1, fp2, ptr[p]);
+    fp1 = ct >> 16;
+    fp2 = ct & 0xffff;
+  }
+  if (len % 2 != 0) {
+    uint32_t ct = speck_round(fp1, fp2, ((uint8_t*)st)[len - 1]);
+    fp1 = ct >> 16;
+    fp2 = ct & 0xffff;
+  }
+  for (int r = 0; r < 22; r++) {
+    uint32_t ct = speck_round(fp1, fp2, 0);
+    fp1 = ct >> 16;
+    fp2 = ct & 0xffff;
+  }
+  return (((uint32_t)fp1) << 16) | fp2;
+}
+
+static uint32_t state_fingerprint(state st) {
+  assert(st.num_gates <= MAX_GATES);
+  /* Zeroize unused memory in the struct. */
+  memset(st.gates + st.num_gates, 0, (MAX_GATES - st.num_gates) * sizeof(gate));
+  return do_fingerprint(&st, sizeof(state));
+}
+
+static uint32_t lut_state_fingerprint(lut_state st) {
+  assert(st.num_luts <= MAX_GATES);
+  /* Zeroize unused memory in the struct. */
+  memset(st.luts + st.num_luts, 0, (MAX_GATES - st.num_luts) * sizeof(lut));
+  return do_fingerprint(&st, sizeof(lut_state));
+}
+
+#ifndef USE_MPI
+static inline bool create_circuit_parallel(bool *done, gatenum *output, state *st,
+    const ttable target, const ttable mask, int8_t *inbits, uint8_t bit, bool andnot_available) {
   assert(done != NULL);
+  assert(output != NULL);
   assert(st != NULL);
   assert(inbits != NULL);
   assert(g_available_workers >= 0);
   *done = false;
   /* Dirty read. */
   if (g_available_workers == 0) {
-    create_circuit_split(st, target, mask, inbits, bit, andnot_available);
+    *output = create_circuit_split(st, target, mask, inbits, bit, andnot_available);
     *done = true;
     return false;
   }
@@ -359,6 +526,7 @@ static inline bool create_circuit_parallel(bool *done, state *st, const ttable t
     work.state.gate = st;
     work.target = target;
     work.mask = mask;
+    work.output = output;
     work.inbits = inbits;
     work.bit = bit;
     work.andnot_available = andnot_available;
@@ -369,10 +537,237 @@ static inline bool create_circuit_parallel(bool *done, state *st, const ttable t
     return true;
   } else {
     pthread_mutex_unlock(&g_worker_mutex);
-    create_circuit_split(st, target, mask, inbits, bit, andnot_available);
+    *output = create_circuit_split(st, target, mask, inbits, bit, andnot_available);
     *done = true;
     return false;
   }
+}
+#endif
+
+static int deserialize_state(uint8_t *buf, size_t size, state *return_state,
+    lut_state *return_lut_state) {
+  assert(!(return_state == NULL && return_lut_state == NULL));
+  assert(buf != NULL);
+  assert(size > 0);
+
+  msgpack_unpacker unp;
+  if (!msgpack_unpacker_init(&unp, size)) {
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  if (msgpack_unpacker_buffer_capacity(&unp) < size) {
+    if (!msgpack_unpacker_reserve_buffer(&unp, size)) {
+      printf("%d\n", __LINE__);
+      return -1;
+    }
+  }
+  memcpy(msgpack_unpacker_buffer(&unp), buf, size);
+  msgpack_unpacker_buffer_consumed(&unp, size);
+  msgpack_unpacked und;
+  msgpack_unpacked_init(&und);
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  int format_version = und.data.via.i64;
+  msgpack_unpacked_destroy(&und);
+  if (format_version != MSGPACK_FORMAT_VERSION) {
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  int state_type = und.data.via.i64;
+  msgpack_unpacked_destroy(&und);
+  if (state_type != MSGPACK_STATE && state_type != MSGPACK_LUT_STATE) {
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  int max_gates = und.data.via.u64;
+  msgpack_unpacked_destroy(&und);
+  if (state_type != MSGPACK_STATE && state_type != MSGPACK_LUT_STATE) {
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  int num_inputs = und.data.via.u64;
+  msgpack_unpacked_destroy(&und);
+  if (num_inputs != 8) {
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_ARRAY) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  int num_outputs = und.data.via.array.size;
+  if (num_outputs != 8) {
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  gatenum outputs[8];
+  for (int i = 0; i < 8; i++) {
+    if (und.data.via.array.ptr[i].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+      msgpack_unpacked_destroy(&und);
+      msgpack_unpacker_destroy(&unp);
+      printf("%d\n", __LINE__);
+      return -1;
+    }
+    outputs[i] = und.data.via.array.ptr[i].via.u64;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_ARRAY) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  int arraysize = und.data.via.array.size;
+
+  int divisor = state_type == MSGPACK_STATE ? 4 : 6;
+  if (arraysize % divisor != 0 || arraysize / divisor > MAX_GATES) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    printf("%d\n", __LINE__);
+    return -1;
+  }
+  for (int i = 0; i < 8; i++) {
+    if (outputs[i] >= arraysize / divisor && outputs[i] != NO_GATE && arraysize / divisor != 0) {
+      msgpack_unpacked_destroy(&und);
+      msgpack_unpacker_destroy(&unp);
+      printf("%d\n", __LINE__);
+      printf("i: %d outputs[i]: %d arraysize: %d divisor: %d arraysize/divisor: %d\n", i,
+          outputs[i], arraysize, divisor, arraysize/divisor);
+      return -1;
+    }
+  }
+
+  if (state_type == MSGPACK_STATE) {
+    assert(return_state != NULL);
+    state st;
+    memset(&st, 0, sizeof(state));
+    st.max_gates = max_gates;
+    st.num_gates = arraysize / 4;
+    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
+    for (int i = 0; i < st.num_gates; i++) {
+      if (und.data.via.array.ptr[i * 4].type != MSGPACK_OBJECT_BIN
+          || und.data.via.array.ptr[i * 4].via.bin.size != 32
+          || und.data.via.array.ptr[i * 4 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 4 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 4 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        printf("line: %d type0: %d size0: %d type1: %d type2: %d type3: %d\n", __LINE__,
+            und.data.via.array.ptr[i * 4].type, und.data.via.array.ptr[i * 4].via.bin.size,
+            und.data.via.array.ptr[i * 4 + 1].type, und.data.via.array.ptr[i * 4 + 2].type,
+            und.data.via.array.ptr[i * 4 + 3].type);
+        return -1;
+      }
+      memcpy(&st.gates[i].table, und.data.via.array.ptr[i * 4].via.bin.ptr, 32);
+      st.gates[i].type = und.data.via.array.ptr[i * 4 + 1].via.u64;
+      st.gates[i].in1 = und.data.via.array.ptr[i * 4 + 2].via.u64;
+      st.gates[i].in2 = und.data.via.array.ptr[i * 4 + 3].via.u64;
+      if ((st.gates[i].type != IN && st.gates[i].type != NOT && st.gates[i].type != AND
+          && st.gates[i].type != OR && st.gates[i].type != XOR && st.gates[i].type != ANDNOT)
+          || (st.gates[i].type == IN && i >= 8)
+          || (st.gates[i].in1 >= st.num_gates && st.gates[i].in1 != NO_GATE)
+          || (st.gates[i].in2 >= st.num_gates && st.gates[i].in2 != NO_GATE)
+          || (st.gates[i].in1 == NO_GATE && i >= 8)
+          || (st.gates[i].in2 == NO_GATE && i >= 8 && st.gates[i].type != NOT)) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        printf("line: %d num gates: %d gate num: %d gate type: %d in1: %d in2: %d\n", __LINE__,
+            st.num_gates, i, st.gates[i].type, st.gates[i].in1, st.gates[i].in2);
+        return -1;
+      }
+    }
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    *return_state = st;
+    return MSGPACK_STATE;
+  } else if (state_type == MSGPACK_LUT_STATE) {
+    assert(return_lut_state != NULL);
+    lut_state st;
+    memset(&st, 0, sizeof(lut_state));
+    st.max_luts = max_gates;
+    st.num_luts = arraysize / 6;
+    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
+    for (int i = 0; i < st.num_luts; i++) {
+      if (und.data.via.array.ptr[i * 6].type != MSGPACK_OBJECT_BIN
+          || und.data.via.array.ptr[i * 6].via.bin.size != 32
+          || und.data.via.array.ptr[i * 6 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 4].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          || und.data.via.array.ptr[i * 6 + 5].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        printf("%d\n", __LINE__);
+        return -1;
+      }
+      memcpy(&st.luts[i].table, und.data.via.array.ptr[i * 6].via.bin.ptr, 32);
+      st.luts[i].type = und.data.via.array.ptr[i * 6 + 1].via.i64;
+      st.luts[i].in1 = und.data.via.array.ptr[i * 6 + 2].via.i64;
+      st.luts[i].in2 = und.data.via.array.ptr[i * 6 + 3].via.i64;
+      st.luts[i].in3 = und.data.via.array.ptr[i * 6 + 4].via.i64;
+      st.luts[i].function = und.data.via.array.ptr[i * 6 + 5].via.i64;
+      if (st.luts[i].type > LUT
+          || (st.luts[i].type == IN && i >= 8)
+          || (st.luts[i].in1 >= st.num_luts && st.luts[i].in1 != NO_GATE)
+          || (st.luts[i].in2 >= st.num_luts && st.luts[i].in2 != NO_GATE)
+          || (st.luts[i].in3 >= st.num_luts && st.luts[i].in3 != NO_GATE)
+          || (st.luts[i].in1 == NO_GATE && i >= 8)
+          || (st.luts[i].in2 == NO_GATE && i >= 8 && st.luts[i].type != NOT)
+          || (st.luts[i].in3 == NO_GATE && i >= 8 && st.luts[i].type == LUT)) {
+        msgpack_unpacked_destroy(&und);
+        msgpack_unpacker_destroy(&unp);
+        printf("%d\n", __LINE__);
+        printf("i: %d type: %d in1: %d in2: %d in3: %d num: %d\n", i, st.luts[i].type,
+            st.luts[i].in1, st.luts[i].in2, st.luts[i].in3, st.num_luts);
+        return -1;
+      }
+    }
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    *return_lut_state = st;
+    return MSGPACK_LUT_STATE;
+  }
+  assert(0);
 }
 
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
@@ -650,14 +1045,37 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   next_inbits[bitp] = -1;
   next_inbits[bitp + 1] = -1;
 
-  bool state_done[8];
+  #ifdef USE_MPI
+  int reserved_worker[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  uint8_t buf[800000];
+  MPI_Request requests[16] = {
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+  const int return_tag = g_next_return_tag++;
+  #else
+  bool state_done[8] = {false, false, false, false, false, false, false, false};
+  #endif
+  bool thread_used = false;
+  int num = 0;
   state new_states[8];
+  gatenum output_gate[8] = {NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE};
   memset(new_states, 0, 8 * sizeof(state));
 
-  bool thread_used = false;
+  #ifdef USE_MPI
+  int rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (bitp < MIN_BITP) {
+    uint16_t reserve = 7 - bitp;
+    MPI_Send(&reserve, 1, MPI_UINT16_T, 0, TAG_GET_AVAIL, MPI_COMM_WORLD);
+    MPI_Recv(reserved_worker, 8, MPI_INT, 0, TAG_RET_AVAIL, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+  }
+  #endif
 
   /* Try all input bit orders. */
   for (int bit = 0; bit < 8; bit++) {
+    /* Check if the current bit number has already been used for selection. */
     bool skip = false;
     for (int i = 0; i < bitp; i++) {
       if (inbits[i] == bit) {
@@ -666,22 +1084,100 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       }
     }
     if (skip) {
+      #ifndef USE_MPI
       state_done[bit] = true;
+      #endif
       continue;
     }
-    state_done[bit] = false;
     if (bit != 0) {
       memcpy(next_inbits + 8 * bit, next_inbits, 8 * sizeof(int8_t));
     }
     new_states[bit] = *st;
     next_inbits[8 * bit + bitp] = bit;
 
-    if (create_circuit_parallel(state_done + bit, new_states + bit, target, mask,
-        next_inbits + 8 * bit, bit, andnot_available)) {
+    #ifdef USE_MPI
+    uint8_t *request = NULL;
+    uint8_t *serialized_state = NULL;
+    if (reserved_worker[num] > 0) {
+      size_t reqsize = serialize_request(&request, target, mask, next_inbits + 8 * bit, bit,
+          andnot_available, return_tag);
+      size_t statesize = serialize_state(new_states[bit], &serialized_state);
+      assert(reqsize > 0 && statesize > 0);
+      //printf("[%4d] Sending job to [%4d].\n", rank, reserved_worker[num]);
+      MPI_Send(request, reqsize, MPI_BYTE, reserved_worker[num], TAG_REQUEST, MPI_COMM_WORLD);
+      MPI_Send(serialized_state, statesize, MPI_BYTE, reserved_worker[num], TAG_REQUEST,
+          MPI_COMM_WORLD);
+      free(request);
+      free(serialized_state);
+      MPI_Irecv(&output_gate[bit], 1, MPI_UINT16_T, reserved_worker[num], return_tag,
+          MPI_COMM_WORLD, &requests[bit * 2]);
+      MPI_Irecv(&buf[bit * 100000], 100000, MPI_BYTE, reserved_worker[num], return_tag,
+          MPI_COMM_WORLD, &requests[bit * 2 + 1]);
       thread_used = true;
+    } else {
+      int worker = -1;
+      if (bitp < MIN_BITP && num < 7 - bitp) {
+        uint16_t reserve = 1;
+        MPI_Send(&reserve, 1, MPI_UINT16_T, 0, TAG_GET_AVAIL, MPI_COMM_WORLD);
+        MPI_Recv(&worker, 1, MPI_INT, 0, TAG_RET_AVAIL, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      }
+      if (worker > 1) {
+        size_t reqsize = serialize_request(&request, target, mask, next_inbits + 8 * bit, bit,
+            andnot_available, return_tag);
+        size_t statesize = serialize_state(new_states[bit], &serialized_state);
+        assert(reqsize > 0 && statesize > 0);
+        MPI_Send(request, reqsize, MPI_BYTE, worker, TAG_REQUEST, MPI_COMM_WORLD);
+        MPI_Send(serialized_state, statesize, MPI_BYTE, worker, TAG_REQUEST, MPI_COMM_WORLD);
+        free(request);
+        free(serialized_state);
+        MPI_Irecv(&output_gate[bit], 1, MPI_UINT16_T, worker, return_tag, MPI_COMM_WORLD,
+            &requests[bit * 2]);
+        MPI_Irecv(&buf[bit * 100000], 100000, MPI_BYTE, worker, return_tag, MPI_COMM_WORLD,
+            &requests[bit * 2 + 1]);
+        thread_used = true;
+      } else {
+        assert(worker == -1);
+        output_gate[bit] = create_circuit_split(&new_states[bit], target, mask,
+            &next_inbits[8 * bit], bit, andnot_available);
+      }
     }
+
+    #else
+
+    if (num == 7 - bitp) {
+      output_gate[bit] = create_circuit_split(&new_states[bit], target, mask, &next_inbits[8 * bit],
+          bit, andnot_available);
+    } else {
+      bool ret = create_circuit_parallel(&state_done[bit], &output_gate[bit], &new_states[bit],
+          target, mask, &next_inbits[8 * bit], bit, andnot_available);
+      if (ret) {
+        thread_used = true;
+      }
+    }
+    #endif
+
+    num += 1;
   }
 
+  #ifdef USE_MPI
+  if (thread_used) {
+    for (int bit = 0; bit < 8; bit++) {
+      //printf("[%4d] (%d) Waiting for %d.\n", rank, bitp, 8 - bit);
+      MPI_Status status1, status2;
+      int size1, size2;
+      MPI_Wait(&requests[bit * 2], &status1);
+      MPI_Get_count(&status1, MPI_UINT16_T, &size1);
+      MPI_Wait(&requests[bit * 2 + 1], &status2);
+      MPI_Get_count(&status2, MPI_BYTE, &size2);
+      if (size1 != 1 || output_gate[bit] == NO_GATE) {
+        continue;
+      }
+      int ret = deserialize_state(&buf[bit * 100000], size2, &new_states[bit], NULL);
+      assert(ret == MSGPACK_STATE);
+      assert(ttable_equals_mask(target, new_states[bit].gates[output_gate[bit]].table, mask));
+    }
+  }
+  #else
   bool alldone = false;
   int wait = 1;
   while (thread_used && !alldone) {
@@ -699,27 +1195,34 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       }
     }
   }
+  #endif
 
   state best;
   best.num_gates = 0;
+  gatenum out_gate = NO_GATE;
 
   for (int i = 0; i < 8; i++) {
-    if (new_states[i].num_gates == 0) {
+    if (output_gate[i] == NO_GATE) {
       continue;
     }
     if (best.num_gates == 0 || best.num_gates > new_states[i].num_gates) {
       best = new_states[i];
+      out_gate = output_gate[i];
     }
   }
-  if (best.num_gates == 0) {
+  if (out_gate == NO_GATE) {
     return NO_GATE;
   }
   *st = best;
-  if (g_verbosity > 1) {
-    printf("Level: %d Best: %d\n", bitp, best.num_gates - 1);
+  if (g_verbosity > 2) {
+    #ifdef USE_MPI
+    printf("[%4d] Level: %d Best: %d\n", rank, bitp, best.num_gates - 8);
+    #else
+    printf("Level: %d Best: %d\n", bitp, best.num_gates - 8);
+    #endif
   }
-  assert(ttable_equals_mask(target, st->gates[st->num_gates - 1].table, mask));
-  return st->num_gates - 1;
+  assert(ttable_equals_mask(target, st->gates[out_gate].table, mask));
+  return out_gate;
 }
 
 static inline gatenum add_lut(lut_state *st, const uint8_t function, const ttable table,
@@ -794,7 +1297,7 @@ static inline ttable generate_lut_ttable(const uint8_t function, const ttable in
 static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
     const int8_t *inbits, bool andnot_available);
 
-static inline void create_lut_circuit_split(lut_state *st, const ttable target,
+static inline gatenum create_lut_circuit_split(lut_state *st, const ttable target,
     const ttable mask, const int8_t *inbits, uint8_t bit, bool andnot_available) {
   assert(st != NULL);
   assert(inbits != NULL);
@@ -805,28 +1308,26 @@ static inline void create_lut_circuit_split(lut_state *st, const ttable target,
 
   gatenum fb = create_lut_circuit(&nnst, target, mask & ~fsel, inbits, andnot_available);
   if (fb == NO_GATE) {
-    memset(st, 0, sizeof(lut_state));
-    return;
+    return NO_GATE;
   }
 
   gatenum fc = create_lut_circuit(&nnst, target, mask & fsel, inbits, andnot_available);
   if (fc == NO_GATE) {
-    memset(st, 0, sizeof(lut_state));
-    return;
+    return NO_GATE;
   }
 
   ttable mux_table = generate_lut_ttable(0xac, nnst.luts[bit].table, nnst.luts[fb].table,
       nnst.luts[fc].table);
   gatenum out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
   if (out == NO_GATE) {
-    memset(st, 0, sizeof(lut_state));
-    return;
+    return NO_GATE;
   }
   assert(ttable_equals_mask(target, nnst.luts[out].table, mask));
   *st = nnst;
-  return;
+  return out;
 }
 
+#ifndef USE_MPI
 static inline bool create_lut_circuit_parallel(bool *done, lut_state *st, const ttable target,
     const ttable mask, int8_t *inbits, uint8_t bit, bool andnot_available) {
   assert(done != NULL);
@@ -873,6 +1374,8 @@ static inline bool create_lut_circuit_parallel(bool *done, lut_state *st, const 
     return false;
   }
 }
+
+#endif
 
 static inline void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3,
     ttable *out) {
@@ -1229,38 +1732,139 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
   next_inbits[bitp] = -1;
   next_inbits[bitp + 1] = -1;
 
-  bool state_done[8];
+  #ifdef USE_MPI
+  int reserved_worker[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  uint8_t buf[800000];
+  MPI_Request requests[16] = {
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL,
+      MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL, MPI_REQUEST_NULL};
+  const int return_tag = g_next_return_tag++;
+  #else
+  bool state_done[8] = {false, false, false, false, false, false, false, false};
+  #endif
+  bool thread_used = false;
+  int num = 0;
   lut_state new_states[8];
+  gatenum output_lut[8] = {NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE};
   memset(new_states, 0, 8 * sizeof(lut_state));
 
-  bool thread_used = false;
+  #ifdef USE_MPI
+  int rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (bitp < MIN_BITP) {
+    uint16_t reserve = 7 - bitp;
+    MPI_Send(&reserve, 1, MPI_UINT16_T, 0, TAG_GET_AVAIL, MPI_COMM_WORLD);
+    MPI_Recv(reserved_worker, 8, MPI_INT, 0, TAG_RET_AVAIL, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+  }
+  #endif
 
   /* Try all input bit orders. */
   for (int8_t bit = 0; bit < 8; bit++) {
     /* Check if the current bit number has already been used for selection. */
     bool skip = false;
-    for (uint8_t i = 0; i < bitp; i++) {
+    for (int i = 0; i < bitp; i++) {
       if (inbits[i] == bit) {
         skip = true;
         break;
       }
     }
     if (skip) {
+      #ifndef USE_MPI
       state_done[bit] = true;
+      #endif
       continue;
     }
-    state_done[bit] = false;
     if (bit != 0) {
       memcpy(next_inbits + 8 * bit, next_inbits, 8 * sizeof(int8_t));
     }
     new_states[bit] = *st;
     next_inbits[8 * bit + bitp] = bit;
-    if (create_lut_circuit_parallel(state_done + bit, new_states + bit, target, mask,
-        next_inbits + 8 * bit, bit, andnot_available)) {
+    #ifdef USE_MPI
+    uint8_t *request = NULL;
+    uint8_t *serialized_state = NULL;
+    if (reserved_worker[num] > 0) {
+      size_t reqsize = serialize_request(&request, target, mask, &next_inbits[8 * bit], bit,
+          andnot_available, return_tag);
+      size_t statesize = serialize_lut_state(new_states[bit], &serialized_state);
+      assert(reqsize > 0 && statesize > 0);
+      MPI_Send(request, reqsize, MPI_BYTE, reserved_worker[num], TAG_REQUEST, MPI_COMM_WORLD);
+      MPI_Send(serialized_state, statesize, MPI_BYTE, reserved_worker[num], TAG_REQUEST,
+          MPI_COMM_WORLD);
+      free(request);
+      free(serialized_state);
+      MPI_Irecv(&output_lut[bit], 1, MPI_UINT16_T, reserved_worker[num], return_tag,
+          MPI_COMM_WORLD, &requests[bit * 2]);
+      MPI_Irecv(&buf[bit * 100000], 100000, MPI_BYTE, reserved_worker[num], return_tag,
+          MPI_COMM_WORLD, &requests[bit * 2 + 1]);
       thread_used = true;
+    } else {
+      int worker = -1;
+      if (bitp < MIN_BITP && num < 7 - bitp) {
+        uint16_t reserve = 1;
+        MPI_Send(&reserve, 1, MPI_UINT16_T, 0, TAG_GET_AVAIL, MPI_COMM_WORLD);
+        MPI_Recv(&worker, 1, MPI_INT, 0, TAG_RET_AVAIL, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      }
+      if (worker > 1) {
+        size_t reqsize = serialize_request(&request, target, mask, next_inbits + 8 * bit, bit,
+            andnot_available, return_tag);
+        size_t statesize = serialize_lut_state(new_states[bit], &serialized_state);
+        assert(reqsize > 0 && statesize > 0);
+        MPI_Send(request, reqsize, MPI_BYTE, worker, TAG_REQUEST, MPI_COMM_WORLD);
+        MPI_Send(serialized_state, statesize, MPI_BYTE, worker, TAG_REQUEST, MPI_COMM_WORLD);
+        free(request);
+        free(serialized_state);
+        MPI_Irecv(&output_lut[bit], 1, MPI_UINT16_T, worker, return_tag, MPI_COMM_WORLD,
+            &requests[bit * 2]);
+        MPI_Irecv(&buf[bit * 100000], 100000, MPI_BYTE, worker, return_tag, MPI_COMM_WORLD,
+            &requests[bit * 2 + 1]);
+        thread_used = true;
+      } else {
+        assert(worker == -1);
+        output_lut[bit] = create_lut_circuit_split(&new_states[bit], target, mask,
+            &next_inbits[8 * bit], bit, andnot_available);
+      }
     }
+
+    #else
+
+    if (num == 7 - bitp) {
+      output_gate[bit] = create_lut_circuit_split(&new_states[bit], target, mask,
+          &next_inbits[8 * bit], bit, andnot_available);
+    } else {
+      bool ret = create_lut_circuit_parallel(&state_done[bit], &output_lut[bit], &new_states[bit],
+          target, mask, &next_inbits[8 * bit], bit, andnot_available);
+      if (ret) {
+        thread_used = true;
+      }
+    }
+    #endif
+
+    num += 1;
   }
 
+  #ifdef USE_MPI
+  if (thread_used) {
+    for (int bit = 0; bit < 8; bit++) {
+      MPI_Status status1, status2;
+      int size1, size2;
+      MPI_Wait(&requests[bit * 2], &status1);
+      MPI_Get_count(&status1, MPI_UINT16_T, &size1);
+      MPI_Wait(&requests[bit * 2 + 1], &status2);
+      MPI_Get_count(&status2, MPI_BYTE, &size2);
+      if (size1 != 1 || output_lut[bit] == NO_GATE) {
+        continue;
+      }
+      int ret = deserialize_state(&buf[bit * 100000], size2, NULL, &new_states[bit]);
+      if (ret != MSGPACK_LUT_STATE) {
+        printf("[%4d] Size: %d\n", rank, size2);
+      }
+      assert(ret == MSGPACK_LUT_STATE);
+      assert(ttable_equals_mask(target, new_states[bit].luts[output_lut[bit]].table, mask));
+    }
+  }
+  #else
   bool alldone = false;
   int wait = 1;
   while (thread_used && !alldone) {
@@ -1278,27 +1882,34 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
       }
     }
   }
+  #endif
 
   lut_state best;
   best.num_luts = 0;
+  gatenum out_lut = NO_GATE;
 
   for (int i = 0; i < 8; i++) {
-    if (new_states[i].num_luts == 0) {
+    if (output_lut[i] == NO_GATE) {
       continue;
     }
     if (best.num_luts == 0 || best.num_luts > new_states[i].num_luts) {
       best = new_states[i];
+      out_lut = output_lut[i];
     }
   }
-  if (best.num_luts == 0) {
+  if (out_lut == NO_GATE) {
     return NO_GATE;
   }
   *st = best;
-  if (g_verbosity > 1) {
-    printf("Level: %d Best: %d\n", bitp, best.num_luts - 1);
+  if (g_verbosity > 2) {
+    #ifdef USE_MPI
+    printf("[%4d] Level: %d Best: %d\n", rank, bitp, best.num_luts - 8);
+    #else
+    printf("Level: %d Best: %d\n", bitp, best.num_luts - 8);
+    #endif
   }
-  assert(ttable_equals_mask(target, st->luts[st->num_luts - 1].table, mask));
-  return st->num_luts - 1;
+  assert(ttable_equals_mask(target, st->luts[out_lut].table, mask));
+  return out_lut;
 }
 
 /* If sbox is true, a target truth table for the given bit of the sbox is generated.
@@ -1476,56 +2087,99 @@ static void print_c_function(const state st) {
   printf("}\n");
 }
 
-static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
-  pt1 = (pt1 >> 7) | (pt1 << 9);
-  pt1 += pt2;
-  pt2 = (pt2 >> 14) | (pt2 << 2);
-  pt1 ^= k1;
-  pt2 ^= pt1;
-  return (((uint32_t)pt1) << 16) | pt2;
-}
+static bool deserialize_request(uint8_t *buf, size_t size, ttable *target, ttable *mask,
+    int8_t *inbits, uint8_t *bit, bool *andnot_available, int *return_state) {
+  assert(buf != NULL);
+  assert(size > 0);
+  assert(target != NULL);
+  assert(mask != NULL);
+  assert(inbits != NULL);
+  assert(bit != NULL);
+  assert(andnot_available != NULL);
 
-/* Generates a simple fingerprint based on the Speck round function. It is meant to be used for
-   creating unique-ish names for the state save file and is not intended to be cryptographically
-   secure by any means. */
-static uint32_t do_fingerprint(void *st, size_t len) {
-  assert(st != NULL);
-  uint16_t fp1 = 0;
-  uint16_t fp2 = 0;
-  uint16_t *ptr = (uint16_t*)st;
-  for (int p = 0; p < len / 2; p++) {
-    uint32_t ct = speck_round(fp1, fp2, ptr[p]);
-    fp1 = ct >> 16;
-    fp2 = ct & 0xffff;
+  msgpack_unpacker unp;
+  if (!msgpack_unpacker_init(&unp, size)) {
+    return false;
   }
-  if (len % 2 != 0) {
-    uint32_t ct = speck_round(fp1, fp2, ((uint8_t*)st)[len - 1]);
-    fp1 = ct >> 16;
-    fp2 = ct & 0xffff;
+  if (msgpack_unpacker_buffer_capacity(&unp) < size) {
+    if (!msgpack_unpacker_reserve_buffer(&unp, size)) {
+      return false;
+    }
   }
-  for (int r = 0; r < 22; r++) {
-    uint32_t ct = speck_round(fp1, fp2, 0);
-    fp1 = ct >> 16;
-    fp2 = ct & 0xffff;
-  }
-  return (((uint32_t)fp1) << 16) | fp2;
-}
+  memcpy(msgpack_unpacker_buffer(&unp), buf, size);
+  msgpack_unpacker_buffer_consumed(&unp, size);
+  msgpack_unpacked und;
+  msgpack_unpacked_init(&und);
 
-static uint32_t state_fingerprint(state st) {
-  assert(st.num_gates <= MAX_GATES);
-  /* Zeroize unused memory in the struct. */
-  memset(st.gates + st.num_gates, 0, (MAX_GATES - st.num_gates) * sizeof(gate));
-  return do_fingerprint(&st, sizeof(state));
-}
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_BIN
+      || und.data.via.bin.size != 32) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return false;
+  }
+  memcpy(target, und.data.via.bin.ptr, 32);
 
-static uint32_t lut_state_fingerprint(lut_state st) {
-  assert(st.num_luts <= MAX_GATES);
-  /* Zeroize unused memory in the struct. */
-  memset(st.luts + st.num_luts, 0, (MAX_GATES - st.num_luts) * sizeof(lut));
-  return do_fingerprint(&st, sizeof(lut_state));
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_BIN
+      || und.data.via.bin.size != 32) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return false;
+  }
+  memcpy(mask, und.data.via.bin.ptr, 32);
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_ARRAY
+      || und.data.via.array.size != 8) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return false;
+  }
+  for (int i = 0; i < 8; i++) {
+    if (und.data.via.array.ptr[i].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+        && und.data.via.array.ptr[i].type != MSGPACK_OBJECT_NEGATIVE_INTEGER) {
+      msgpack_unpacked_destroy(&und);
+      msgpack_unpacker_destroy(&unp);
+      return false;
+    }
+    inbits[i] = und.data.via.array.ptr[i].via.i64;
+  }
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return false;
+  }
+  *bit = und.data.via.u64;
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_BOOLEAN) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return false;
+  }
+  *andnot_available = und.data.via.boolean;
+
+  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+    msgpack_unpacked_destroy(&und);
+    msgpack_unpacker_destroy(&unp);
+    return false;
+  }
+  *return_state = und.data.via.u64;
+
+  msgpack_unpacked_destroy(&und);
+  msgpack_unpacker_destroy(&unp);
+  return true;
 }
 
 static void save_state(state st) {
+  uint8_t *serialized = NULL;
+  size_t size = serialize_state(st, &serialized);
+  assert(size > 0);
+  assert(serialized != NULL);
   /* Generate a string with the output gates present in the state, in the order they were added. */
   char out[9];
   int num_outputs = 0;
@@ -1547,29 +2201,27 @@ static void save_state(state st) {
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
     fprintf(stderr, "Error opening file for writing.\n");
+    free(serialized);
     return;
   }
-  msgpack_packer pk;
-  msgpack_packer_init(&pk, fp, msgpack_fbuffer_write);
-  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
-  msgpack_pack_int(&pk, MSGPACK_STATE);
-  msgpack_pack_int(&pk, 8); /* Number of inputs. */
-  msgpack_pack_array(&pk, 8); /* Number of outputs. */
-  for (int i = 0; i < 8; i++) {
-    msgpack_pack_int(&pk, st.outputs[i]);
+
+  if (fwrite(serialized, size, 1, fp) != 1) {
+    fprintf(stderr, "Error writing to file.\n");
+    fclose(fp);
+    free(serialized);
+    return;
   }
-  msgpack_pack_array(&pk, st.num_gates * 4);
-  for (int i = 0; i < st.num_gates; i++) {
-    msgpack_pack_bin(&pk, 32);
-    msgpack_pack_bin_body(&pk, &st.gates[i].table, 32);
-    msgpack_pack_int(&pk, st.gates[i].type);
-    msgpack_pack_int(&pk, st.gates[i].in1);
-    msgpack_pack_int(&pk, st.gates[i].in2);
-  }
+  free(serialized);
+
   fclose(fp);
 }
 
 static void save_lut_state(lut_state st) {
+  uint8_t *serialized = NULL;
+  size_t size = serialize_lut_state(st, &serialized);
+  assert(size > 0);
+  assert(serialized != NULL);
+
   char out[9];
   int num_outputs = 0;
   memset(out, 0, 9);
@@ -1592,25 +2244,13 @@ static void save_lut_state(lut_state st) {
     fprintf(stderr, "Error opening file for writing.\n");
     return;
   }
-  msgpack_packer pk;
-  msgpack_packer_init(&pk, fp, msgpack_fbuffer_write);
-  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
-  msgpack_pack_int(&pk, MSGPACK_LUT_STATE);
-  msgpack_pack_int(&pk, 8); /* Number of inputs. */
-  msgpack_pack_array(&pk, 8); /* Number of outputs. */
-  for (int i = 0; i < 8; i++) {
-    msgpack_pack_int(&pk, st.outputs[i]);
+
+  if (fwrite(serialized, size, 1, fp) != 1) {
+    fprintf(stderr, "Error writing to file.\n");
+    fclose(fp);
+    return;
   }
-  msgpack_pack_array(&pk, st.num_luts * 6);
-  for (int i = 0; i < st.num_luts; i++) {
-    msgpack_pack_bin(&pk, 32);
-    msgpack_pack_bin_body(&pk, &st.luts[i].table, 32);
-    msgpack_pack_int(&pk, st.luts[i].type);
-    msgpack_pack_int(&pk, st.luts[i].in1);
-    msgpack_pack_int(&pk, st.luts[i].in2);
-    msgpack_pack_int(&pk, st.luts[i].in3);
-    msgpack_pack_int(&pk, st.luts[i].function);
-  }
+  free(serialized);
   fclose(fp);
 }
 
@@ -1626,180 +2266,169 @@ static int load_state(const char *name, state *return_state, lut_state *return_l
   fseek(fp, 0, SEEK_END);
   size_t fsize = ftell(fp);
   fseek(fp, 0, SEEK_SET);
-  msgpack_unpacker unp;
-  if (!msgpack_unpacker_init(&unp, fsize)) {
-    return -1;
-  }
-  if (fread(msgpack_unpacker_buffer(&unp), fsize, 1, fp) != 1) {
+  uint8_t *buf = (uint8_t*)malloc(fsize);
+  assert(buf != NULL);
+  if (fread(buf, fsize, 1, fp) != 1) {
+    free(buf);
+    fclose(fp);
     return -1;
   }
   fclose(fp);
-  fp = NULL;
-  msgpack_unpacker_buffer_consumed(&unp, fsize);
-
-  msgpack_unpacked und;
-  msgpack_unpacked_init(&und);
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int format_version = und.data.via.i64;
-  msgpack_unpacked_destroy(&und);
-  if (format_version != MSGPACK_FORMAT_VERSION) {
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int state_type = und.data.via.i64;
-  msgpack_unpacked_destroy(&und);
-  if (state_type != MSGPACK_STATE && state_type != MSGPACK_LUT_STATE) {
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int num_inputs = und.data.via.i64;
-  msgpack_unpacked_destroy(&und);
-  if (num_inputs != 8) {
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_ARRAY) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int num_outputs = und.data.via.array.size;
-  if (num_outputs != 8) {
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  gatenum outputs[8];
-  for (int i = 0; i < 8; i++) {
-    if (und.data.via.array.ptr[i].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-      msgpack_unpacked_destroy(&und);
-      msgpack_unpacker_destroy(&unp);
-      return -1;
-    }
-    outputs[i] = und.data.via.array.ptr[i].via.i64;
-  }
-  msgpack_unpacked_destroy(&und);
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_ARRAY) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int arraysize = und.data.via.array.size;
-
-  int divisor = state_type == MSGPACK_STATE ? 4 : 6;
-  if (arraysize % divisor != 0 || arraysize / divisor > MAX_GATES) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  for (int i = 0; i < 8; i++) {
-    if (outputs[i] >= arraysize / divisor && outputs[i] != NO_GATE) {
-      msgpack_unpacked_destroy(&und);
-      msgpack_unpacker_destroy(&unp);
-      return -1;
-    }
-  }
-
-  if (state_type == MSGPACK_STATE) {
-    state st;
-    st.max_gates = MAX_GATES;
-    st.num_gates = arraysize / 4;
-    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
-    for (int i = 0; i < st.num_gates; i++) {
-      if (und.data.via.array.ptr[i * 4].type != MSGPACK_OBJECT_BIN
-          || und.data.via.array.ptr[i * 4].via.bin.size != 32
-          || und.data.via.array.ptr[i * 4 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 4 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 4 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
-      memcpy(&st.gates[i].table, und.data.via.array.ptr[i * 4].via.bin.ptr, 32);
-      st.gates[i].type = und.data.via.array.ptr[i * 4 + 1].via.i64;
-      st.gates[i].in1 = und.data.via.array.ptr[i * 4 + 2].via.i64;
-      st.gates[i].in2 = und.data.via.array.ptr[i * 4 + 3].via.i64;
-      if (st.gates[i].type > ANDNOT
-          || (st.gates[i].type == IN && i >= 8)
-          || (st.gates[i].in1 >= st.num_gates && st.gates[i].in1 != NO_GATE)
-          || (st.gates[i].in2 >= st.num_gates && st.gates[i].in2 != NO_GATE)
-          || (st.gates[i].in1 == NO_GATE && i >= 8)
-          || (st.gates[i].in2 == NO_GATE && i >= 8 && st.gates[i].type != NOT)) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
-    }
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    *return_state = st;
-    return MSGPACK_STATE;
-  } else if (state_type == MSGPACK_LUT_STATE) {
-    lut_state st;
-    st.max_luts = MAX_GATES;
-    st.num_luts = arraysize / 6;
-    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
-    for (int i = 0; i < st.num_luts; i++) {
-      if (und.data.via.array.ptr[i * 6].type != MSGPACK_OBJECT_BIN
-          || und.data.via.array.ptr[i * 6].via.bin.size != 32
-          || und.data.via.array.ptr[i * 6 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 4].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 5].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
-      memcpy(&st.luts[i].table, und.data.via.array.ptr[i * 6].via.bin.ptr, 32);
-      st.luts[i].type = und.data.via.array.ptr[i * 6 + 1].via.i64;
-      st.luts[i].in1 = und.data.via.array.ptr[i * 6 + 2].via.i64;
-      st.luts[i].in2 = und.data.via.array.ptr[i * 6 + 3].via.i64;
-      st.luts[i].in3 = und.data.via.array.ptr[i * 6 + 4].via.i64;
-      st.luts[i].function = und.data.via.array.ptr[i * 6 + 5].via.i64;
-      if (st.luts[i].type > ANDNOT
-          || (st.luts[i].type == IN && i >= 8)
-          || (st.luts[i].in1 >= st.num_luts && st.luts[i].in1 != NO_GATE)
-          || (st.luts[i].in2 >= st.num_luts && st.luts[i].in2 != NO_GATE)
-          || (st.luts[i].in3 >= st.num_luts && st.luts[i].in2 != NO_GATE)
-          || (st.luts[i].in1 == NO_GATE && i >= 8)
-          || (st.luts[i].in2 == NO_GATE && i >= 8 && st.luts[i].type != NOT)
-          || (st.luts[i].in3 == NO_GATE && i >= 8 && st.luts[i].type == LUT)) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
-    }
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    *return_lut_state = st;
-    return MSGPACK_LUT_STATE;
-  }
-  assert(0);
+  int ret = deserialize_state(buf, fsize, return_state, return_lut_state);
+  free(buf);
+  return ret;
 }
+
+#ifdef USE_MPI
+static gatenum mpi_create_circuit(state *st, const ttable target, const ttable mask,
+    const int8_t *inbits, bool andnot_available) {
+  assert(st != NULL);
+  assert(inbits != NULL);
+  int size;
+  int rank;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  assert(rank == 0);
+  int available[size];
+  int availp = 0;
+
+  for (int i = 2; i < size; i++) {
+    available[availp++] = i;
+  }
+
+  uint8_t *request;
+  uint8_t *start_state;
+  int reqsize = serialize_request(&request, target, mask, inbits, 0, andnot_available, TAG_STATE);
+  int statesize = serialize_state(*st, &start_state);
+  assert(reqsize > 0 && statesize > 0);
+  MPI_Send(request, reqsize, MPI_BYTE, 1, TAG_START, MPI_COMM_WORLD);
+  MPI_Send(start_state, statesize, MPI_BYTE, 1, TAG_START, MPI_COMM_WORLD);
+  free(request);
+  free(start_state);
+  request = NULL;
+  start_state = NULL;
+
+  uint8_t buf[100000];
+  uint16_t recv;
+  int serialized_size;
+  int num = -1;
+  MPI_Status status;
+  while (true) {
+    MPI_Recv(&recv, 1, MPI_UINT16_T, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+    switch (status.MPI_TAG) {
+      case TAG_GET_AVAIL:
+        if (availp >= recv) {
+          num = recv;
+        } else {
+          num = availp;
+        }
+        availp -= num;
+        if (g_verbosity > 1) {
+          printf("[%4d] -> [%4d] Requested %d workers. Sent %d.\n", rank, status.MPI_SOURCE, recv,
+              num);
+        }
+        MPI_Send(&available[availp], num, MPI_INT, status.MPI_SOURCE, TAG_RET_AVAIL,
+            MPI_COMM_WORLD);
+        break;
+      case TAG_IS_AVAIL:
+        available[availp++] = status.MPI_SOURCE;
+        if (g_verbosity > 1) {
+          printf("[   0] <- [%4d] Available. Available workers: %d\n", status.MPI_SOURCE, availp);
+        }
+        break;
+      case TAG_STATE:
+        assert(status.MPI_SOURCE == 1);
+        MPI_Recv(buf, 100000, MPI_BYTE, status.MPI_SOURCE, TAG_STATE, MPI_COMM_WORLD, &status);
+        if (recv == NO_GATE) {
+          return NO_GATE;
+        }
+        MPI_Get_count(&status, MPI_BYTE, &serialized_size);
+        int ret = deserialize_state(buf, serialized_size, st, NULL);
+        assert(ttable_equals(st->gates[recv].table, target));
+        assert(ret == MSGPACK_STATE && st->num_gates > 7);
+        return recv;
+      default:
+        break;
+    }
+  }
+}
+
+static gatenum mpi_create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
+    const int8_t *inbits, bool andnot_available) {
+  assert(st != NULL);
+  assert(inbits != NULL);
+  int size;
+  int rank;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  assert(rank == 0);
+  int available[size];
+  int availp = 0;
+
+  for (int i = 2; i < size; i++) {
+    available[availp++] = i;
+  }
+
+  uint8_t *request;
+  uint8_t *start_state;
+  int reqsize = serialize_request(&request, target, mask, inbits, 0, andnot_available, TAG_STATE);
+  int statesize = serialize_lut_state(*st, &start_state);
+  assert(reqsize > 0 && statesize > 0);
+  MPI_Send(request, reqsize, MPI_BYTE, 1, TAG_START, MPI_COMM_WORLD);
+  MPI_Send(start_state, statesize, MPI_BYTE, 1, TAG_START, MPI_COMM_WORLD);
+  free(request);
+  free(start_state);
+  request = NULL;
+  start_state = NULL;
+
+  uint8_t buf[100000];
+  uint16_t recv;
+  int serialized_size;
+  int num = -1;
+  MPI_Status status;
+  while (true) {
+    MPI_Recv(&recv, 1, MPI_UINT16_T, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+    switch (status.MPI_TAG) {
+      case TAG_GET_AVAIL:
+        if (availp >= recv) {
+          num = recv;
+        } else {
+          num = availp;
+        }
+        availp -= num;
+        if (g_verbosity > 1) {
+          printf("[%4d] -> [%4d] Requested %d workers. Sent %d.\n", rank, status.MPI_SOURCE, recv,
+              num);
+        }
+        MPI_Send(&available[availp], num, MPI_INT, status.MPI_SOURCE, TAG_RET_AVAIL,
+            MPI_COMM_WORLD);
+        break;
+      case TAG_IS_AVAIL:
+        available[availp++] = status.MPI_SOURCE;
+        if (g_verbosity > 1) {
+          printf("[   0] <- [%4d] Available. Available workers: %d\n", status.MPI_SOURCE, availp);
+        }
+        break;
+      case TAG_STATE:
+        assert(status.MPI_SOURCE == 1);
+        MPI_Recv(buf, 100000, MPI_BYTE, status.MPI_SOURCE, TAG_STATE, MPI_COMM_WORLD,
+            &status);
+        if (recv == NO_GATE) {
+          return NO_GATE;
+        }
+        MPI_Get_count(&status, MPI_BYTE, &serialized_size);
+        int ret = deserialize_state(buf, serialized_size, NULL, st);
+        assert(ttable_equals(st->luts[recv].table, target));
+        assert(ret == MSGPACK_LUT_STATE && st->num_luts > 7);
+        return recv;
+      default:
+        break;
+    }
+  }
+}
+
+
+#endif
 
 /* Called by main to generate a graph of standard (NOT, AND, OR, XOR) gates. */
 void generate_gate_graph(bool andnot_available) {
@@ -1840,7 +2469,6 @@ void generate_gate_graph(bool andnot_available) {
     printf("Generating circuits with %d output%s.\n", num_outputs + 1, num_outputs == 0 ? "" : "s");
     for (uint8_t current_state = 0; current_state < num_start_states; current_state++) {
       start_states[current_state].max_gates = max_gates;
-
       /* Add all outputs not already present to see which resulting network is the smallest. */
       for (uint8_t output = 0; output < 8; output++) {
         if (start_states[current_state].outputs[output] != NO_GATE) {
@@ -1852,25 +2480,33 @@ void generate_gate_graph(bool andnot_available) {
         state st = start_states[current_state];
         st.max_gates = max_gates;
         const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
+        #ifdef USE_MPI
+        st.outputs[output] = mpi_create_circuit(&st, g_target[output], mask, bits,
+            andnot_available);
+        #else
         st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot_available);
+        #endif
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
           continue;
+        } else {
+          printf("Solution for output %d: %d gates. Fingerprint: %08x\n", output, st.num_gates - 8,
+              state_fingerprint(st));
         }
         assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
         save_state(st);
 
         if (max_gates > st.num_gates) {
           max_gates = st.num_gates;
-          num_out_states = 0;
-        }
-        if (st.num_gates <= max_gates) {
+          out_states[0] = st;
+          num_out_states = 1;
+        } else if (max_gates == st.num_gates) {
           out_states[num_out_states++] = st;
         }
       }
     }
-    printf("Found %d state%s with %d gates.\n", num_out_states,
-        num_out_states == 1 ? "" : "s", max_gates - 8);
+    printf("Found %d state%s with %d gates.\n", num_out_states, num_out_states == 1 ? "" : "s",
+        max_gates - 8);
     for (uint8_t i = 0; i < num_out_states; i++) {
       start_states[i] = out_states[i];
     }
@@ -1879,7 +2515,7 @@ void generate_gate_graph(bool andnot_available) {
 }
 
 /* Called by main to generate a graph of 3-bit LUTs. */
-int generate_lut_graph(bool andnot_available) {
+void generate_lut_graph(bool andnot_available) {
   uint8_t num_start_states = 1;
   lut_state start_states[8];
 
@@ -1932,20 +2568,28 @@ int generate_lut_graph(bool andnot_available) {
         lut_state st = start_states[current_state];
         st.max_luts = max_luts;
         const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
+        #ifdef USE_MPI
+        st.outputs[output] = mpi_create_lut_circuit(&st, g_target[output], mask, bits,
+            andnot_available);
+        #else
         st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits,
             andnot_available);
+        #endif
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
           continue;
+        } else {
+          printf("Solution for output %d: %d LUTs. Fingerprint: %08x\n", output, st.num_luts - 8,
+              lut_state_fingerprint(st));
         }
         assert(ttable_equals(g_target[output], st.luts[st.outputs[output]].table));
         save_lut_state(st);
 
         if (max_luts > st.num_luts) {
           max_luts = st.num_luts;
-          num_out_states = 0;
-        }
-        if (st.num_luts <= max_luts) {
+          out_states[0] = st;
+          num_out_states = 1;
+        } else if (max_luts == st.num_luts) {
           out_states[num_out_states++] = st;
         }
       }
@@ -1957,10 +2601,97 @@ int generate_lut_graph(bool andnot_available) {
     }
     num_start_states = num_out_states;
   }
-
-  return 0;
 }
 
+#ifdef USE_MPI
+void mpi_worker() {
+  bool stop = false;
+  int rank;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  uint8_t buf[100000];
+  uint8_t buf2[100000];
+  int reqsize;
+  while (!stop) {
+    MPI_Status status;
+    MPI_Recv(buf, 100000, MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+    switch (status.MPI_TAG) {
+      case TAG_REQUEST:
+      case TAG_START:
+        //printf("[%4d] Got job from [%4d].\n", rank, status.MPI_SOURCE);
+        MPI_Get_count(&status, MPI_BYTE, &reqsize);
+        MPI_Status status2;
+        MPI_Recv(buf2, 100000, MPI_BYTE, status.MPI_SOURCE, status.MPI_TAG, MPI_COMM_WORLD,
+            &status2);
+        int statesize;
+        MPI_Get_count(&status2, MPI_BYTE, &statesize);
+        ttable target;
+        ttable mask;
+        int8_t inbits[8];
+        uint8_t bit;
+        bool andnot_available;
+        state st;
+        lut_state lst;
+        int return_tag;
+        bool deserialize_ret = deserialize_request(buf, reqsize, &target, &mask, inbits, &bit,
+            &andnot_available, &return_tag);
+        assert(deserialize_ret);
+        int ret = deserialize_state(buf2, statesize, &st, &lst);
+        assert(ret == MSGPACK_STATE || ret == MSGPACK_LUT_STATE);
+        uint8_t *serialized = NULL;
+        gatenum outgate;
+        if (ret == MSGPACK_STATE) {
+          if (status.MPI_TAG == TAG_REQUEST) {
+            outgate = create_circuit_split(&st, target, mask, inbits, bit, andnot_available);
+          } else {
+            assert(status.MPI_TAG == TAG_START && status.MPI_SOURCE == 0);
+            outgate = create_circuit(&st, target, mask, inbits, andnot_available);
+          }
+          MPI_Send(&outgate, 1, MPI_UINT16_T, status.MPI_SOURCE, return_tag, MPI_COMM_WORLD);
+          if (outgate != NO_GATE) {
+            assert(ttable_equals_mask(target, st.gates[outgate].table, mask));
+            int retsize = serialize_state(st, &serialized);
+            assert(retsize > 0);
+            MPI_Send(serialized, retsize, MPI_BYTE, status.MPI_SOURCE, return_tag, MPI_COMM_WORLD);
+            free(serialized);
+            serialized = NULL;
+          } else {
+            MPI_Send(NULL, 0, MPI_BYTE, status.MPI_SOURCE, return_tag, MPI_COMM_WORLD);
+          }
+        } else {
+          if (status.MPI_TAG == TAG_REQUEST) {
+            outgate = create_lut_circuit_split(&lst, target, mask, inbits, bit, andnot_available);
+          } else {
+            assert(status.MPI_TAG == TAG_START && status.MPI_SOURCE == 0);
+            outgate = create_lut_circuit(&lst, target, mask, inbits, andnot_available);
+          }
+          MPI_Send(&outgate, 1, MPI_UINT16_T, status.MPI_SOURCE, return_tag, MPI_COMM_WORLD);
+          if (outgate != NO_GATE) {
+            assert(ttable_equals_mask(target, lst.luts[outgate].table, mask));
+            int retsize = serialize_lut_state(lst, &serialized);
+            assert(retsize > 0);
+            MPI_Send(serialized, retsize, MPI_BYTE, status.MPI_SOURCE, return_tag, MPI_COMM_WORLD);
+            free(serialized);
+            serialized = NULL;
+          } else {
+            MPI_Send(NULL, 0, MPI_BYTE, status.MPI_SOURCE, return_tag, MPI_COMM_WORLD);
+          }
+        }
+        uint16_t msg = 0;
+        if (status.MPI_TAG != TAG_START) {
+          MPI_Send(&msg, 1, MPI_UINT16_T, 0, TAG_IS_AVAIL, MPI_COMM_WORLD);
+        }
+        break;
+      case TAG_STOP:
+        stop = true;
+        break;
+      default:
+        fprintf(stderr, "[%4d] Received unexpected tag: %d\n", rank, status.MPI_TAG);
+        break;
+    }
+  }
+}
+
+#else
 void *worker_thread(void *arg) {
   pthread_mutex_lock(&g_worker_mutex);
   int threadno = g_running_threads++;
@@ -1977,18 +2708,19 @@ void *worker_thread(void *arg) {
        to get around a bug in gcc. */
     thread_work work;
     memcpy(&work, g_thread_work + threadno, sizeof(thread_work));
-    if (g_verbosity > 0) {
+    if (g_verbosity > 1) {
       printf("[%d] Starting work. Bit: %d\n", threadno, work.bit);
     }
     pthread_mutex_unlock(&g_worker_mutex);
     if (work.lut) {
-      create_lut_circuit_split(work.state.lut, work.target, work.mask, work.inbits, work.bit,
-          work.andnot_available);
+      create_lut_circuit_split(work.state.lut, work.target, work.mask, work.inbits,
+          work.bit, work.andnot_available);
+
     } else {
-      create_circuit_split(work.state.gate, work.target, work.mask, work.inbits, work.bit,
-          work.andnot_available);
+      *work.output = create_circuit_split(work.state.gate, work.target, work.mask, work.inbits,
+          work.bit, work.andnot_available);
     }
-    if (g_verbosity > 0) {
+    if (g_verbosity > 1) {
       printf("[%d] Done.\n", threadno);
     }
     pthread_mutex_lock(&g_worker_mutex);
@@ -2001,8 +2733,29 @@ void *worker_thread(void *arg) {
   pthread_mutex_unlock(&g_worker_mutex);
   return NULL;
 }
+#endif
 
 int main(int argc, char **argv) {
+
+  #ifdef USE_MPI
+  MPI_Init(&argc, &argv);
+  int rank;
+  int size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size < 2) {
+    fprintf(stderr, "At least two MPI nodes are needed to run.\n");
+    MPI_Finalize();
+    return 1;
+  }
+  if (rank == 0) {
+    printf("Size: %d\n", size);
+  }
+  struct rlimit rl;
+  getrlimit(RLIMIT_NOFILE, &rl);
+  rl.rlim_cur = rl.rlim_max;
+  setrlimit(RLIMIT_NOFILE, &rl);
+  #endif
 
   /* Generate truth tables for all output bits of the target sbox. */
   for (uint8_t i = 0; i < 8; i++) {
@@ -2033,6 +2786,9 @@ int main(int argc, char **argv) {
             "-l       Generate LUT graph.\n"
             "-n       ANDNOT gates available.\n"
             "-v       Verbose output.\n\n");
+        #ifdef USE_MPI
+        MPI_Finalize();
+        #endif
         return 0;
       case 'l':
         lut_graph = true;
@@ -2044,12 +2800,18 @@ int main(int argc, char **argv) {
         g_verbosity += 1;
         break;
       default:
+        #ifdef USE_MPI
+        MPI_Finalize();
+        #endif
         return 1;
     }
   }
 
   if (output_c && output_dot) {
     fprintf(stderr, "Cannot combine c and d options.\n");
+    #ifdef USE_MPI
+    MPI_Finalize();
+    #endif
     return 1;
   }
 
@@ -2057,25 +2819,52 @@ int main(int argc, char **argv) {
   lut_state return_lut_state;
   int loaded_state_type = -1;
   if (output_c || output_dot) {
+    #ifdef USE_MPI
+    if (rank != 0) {
+      MPI_Finalize();
+      return 0;
+    }
+    #endif
     loaded_state_type = load_state(fname, &return_state, &return_lut_state);
     if (loaded_state_type != MSGPACK_STATE && loaded_state_type != MSGPACK_LUT_STATE) {
       fprintf(stderr, "Error when reading state file.\n");
+      #ifdef USE_MPI
+      MPI_Finalize();
+      #endif
       return 1;
     }
   }
 
   if (output_c) {
+    #ifdef USE_MPI
+    if (rank != 0) {
+      MPI_Finalize();
+      return 0;
+    }
+    #endif
     if (loaded_state_type == MSGPACK_LUT_STATE) {
       fprintf(stderr, "Outputting LUT graph as C function not supported.\n");
+      #ifdef USE_MPI
+      MPI_Finalize();
+      #endif
       return 1;
     } else if (loaded_state_type == MSGPACK_STATE) {
       print_c_function(return_state);
+      #ifdef USE_MPI
+      MPI_Finalize();
+      #endif
       return 0;
     }
     assert(0);
   }
 
   if (output_dot) {
+    #ifdef USE_MPI
+    if (rank != 0) {
+      MPI_Finalize();
+      return 0;
+    }
+    #endif
     if (loaded_state_type == MSGPACK_LUT_STATE) {
       print_lut_digraph(return_lut_state);
     } else if (loaded_state_type == MSGPACK_STATE) {
@@ -2083,9 +2872,31 @@ int main(int argc, char **argv) {
     } else {
       assert(0);
     }
+    #ifdef USE_MPI
+    MPI_Finalize();
+    #endif
     return 0;
   }
 
+  #ifdef USE_MPI
+  if (rank == 0) {
+    if (lut_graph) {
+      printf("Generating LUT graph.\n");
+      generate_lut_graph(andnot_available);
+    } else {
+      printf("Generating standard gate graph.\n");
+      generate_gate_graph(andnot_available);
+    }
+    uint8_t msg = 0;
+    for (int i = 1; i < size; i++) {
+      MPI_Send(&msg, 1, MPI_BYTE, i, TAG_STOP, MPI_COMM_WORLD);
+    }
+  } else {
+    mpi_worker();
+  }
+
+  MPI_Finalize();
+  #else
   int numproc = sysconf(_SC_NPROCESSORS_ONLN) - 1;
   pthread_mutex_init(&g_worker_mutex, NULL);
   pthread_cond_init(&g_worker_cond, NULL);
@@ -2102,7 +2913,7 @@ int main(int argc, char **argv) {
 
   if (lut_graph) {
     printf("Generating LUT graph.\n");
-    return generate_lut_graph(andnot_available);
+    generate_lut_graph(andnot_available);
   } else {
     printf("Generating standard gate graph.\n");
     generate_gate_graph(andnot_available);
@@ -2119,6 +2930,7 @@ int main(int argc, char **argv) {
   free(g_thread_work);
   pthread_cond_destroy(&g_worker_cond);
   pthread_mutex_destroy(&g_worker_mutex);
+  #endif
 
   return 0;
 }
