@@ -9,12 +9,6 @@ or on FPGAs.
 
 ## Build
 
-With OpenMP (highly recommended):
-```console
-$ gcc -Ofast -march=native -fopenmp sboxgates.c -o sboxgates -lmsgpackc
-```
-
-Without OpenMP:
 ```console
 $ gcc -Ofast -march=native sboxgates.c -o sboxgates -lmsgpackc
 ```

@@ -10,7 +10,6 @@
 #include <inttypes.h>
 #include <msgpack.h>
 #include <msgpack/fbuffer.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,14 +17,13 @@
 #include <unistd.h>
 #include <x86intrin.h>
 
-#define MSGPACK_FORMAT_VERSION 1
-#define MSGPACK_STATE 0
-#define MSGPACK_LUT_STATE 1
+#define MSGPACK_FORMAT_VERSION 2
 #define MAX_GATES 500
 #define NO_GATE ((gatenum)-1)
 #define PRIgatenum PRIu16
 
 typedef enum {IN, NOT, AND, OR, XOR, ANDNOT, LUT} gate_type;
+typedef enum {GATES, SAT} metric;
 
 typedef __m256i ttable; /* 256 bit truth table. */
 typedef uint16_t gatenum;
@@ -35,46 +33,20 @@ typedef struct {
   gate_type type;
   gatenum in1; /* Input 1 to the gate. NO_GATE for the inputs. */
   gatenum in2; /* Input 2 to the gate. NO_GATE for NOT gates and the inputs. */
+  gatenum in3; /* Input 3 if LUT or NO_GATE. */
+  uint8_t function; /* For LUTs. */
 } gate;
 
 typedef struct {
+  int max_sat_metric;
+  int sat_metric;
   gatenum max_gates;
   gatenum num_gates;  /* Current number of gates. */
   gatenum outputs[8]; /* Gate number of the respective output gates, or NO_GATE. */
   gate gates[MAX_GATES];
 } state;
 
-typedef struct {
-  ttable table;
-  gate_type type;
-  gatenum in1; /* Input 1 to the LUT/gate, or NO_GATE. */
-  gatenum in2; /* Input 2 to the LUT/gate, or NO_GATE. */
-  gatenum in3; /* Input 3 to the LUT/gate, or NO_GATE. */
-  uint8_t function;
-} lut;
-
-typedef struct {
-  gatenum max_luts;
-  gatenum num_luts;   /* Current number of LUTs. */
-  gatenum outputs[8]; /* LUT number of the respective output LUTs, or NO_GATE. */
-  lut luts[MAX_GATES];
-} lut_state;
-
-typedef struct {
-  ttable target;
-  ttable mask;
-  union {
-    state *gate;
-    lut_state *lut;
-  } state;
-  int8_t *inbits;
-  bool *done;
-  bool lut;
-  bool andnot_available;
-  uint8_t bit;
-} thread_work;
-
-const uint8_t g_sbox_enc[] = {
+const uint8_t g_lattice_sbox[] = {
     0x9c, 0xf2, 0x14, 0xc1, 0x8e, 0xcb, 0xb2, 0x65, 0x97, 0x7a, 0x60, 0x17, 0x92, 0xf9, 0x78, 0x41,
     0x07, 0x4c, 0x67, 0x6d, 0x66, 0x4a, 0x30, 0x7d, 0x53, 0x9d, 0xb5, 0xbc, 0xc3, 0xca, 0xf1, 0x04,
     0x03, 0xec, 0xd0, 0x38, 0xb0, 0xed, 0xad, 0xc4, 0xdd, 0x56, 0x42, 0xbd, 0xa0, 0xde, 0x1b, 0x81,
@@ -92,17 +64,12 @@ const uint8_t g_sbox_enc[] = {
     0xcd, 0x15, 0x21, 0x23, 0xd8, 0xb6, 0x0c, 0x3f, 0x54, 0x1a, 0xbf, 0x98, 0x48, 0x3a, 0x75, 0x77,
     0x2b, 0xae, 0x36, 0xda, 0x7e, 0x86, 0x35, 0x51, 0x05, 0x12, 0xb8, 0xa6, 0x9a, 0x2c, 0x06, 0x4b};
 
+uint8_t g_sbox_enc[256];
+
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 uint8_t g_verbosity = 0;  /* Verbosity level. Higher = more debugging messages. */
-
-pthread_mutex_t g_worker_mutex;
-pthread_cond_t g_worker_cond;
-int g_available_workers = 0;
-int g_running_threads = 0;
-thread_work *g_thread_work;
-bool g_stop_workers = false;
-
-int g_called = 0;
+metric g_metric = GATES;  /* Metric that should be used when selecting between two solutions. */
+FILE *g_rand_fp = NULL;   /* Pointer to /dev/urandom. */
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -141,19 +108,58 @@ static inline bool ttable_equals_mask(const ttable in1, const ttable in2, const 
    equal to NO_GATE (only gid1 in case of a NOT gate), NO_GATE will be returned. */
 static inline gatenum add_gate(state *st, gate_type type, ttable table, gatenum gid1,
     gatenum gid2) {
-  if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT)) {
+  if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT) || st->num_gates > st->max_gates) {
     return NO_GATE;
   }
-  assert(type != IN);
+  if (g_metric == SAT && st->sat_metric > st->max_sat_metric) {
+    return NO_GATE;
+  }
+  assert(type != IN && type != LUT);
   assert(gid1 < st->num_gates);
   assert(gid2 < st->num_gates || type == NOT);
-  if (st->num_gates >= st->max_gates) {
-    return NO_GATE;
+  assert(gid1 != gid2);
+  switch (type) {
+    case NOT:
+      break;
+    case AND:
+    case OR:
+    case ANDNOT:
+      st->sat_metric += 1;
+      break;
+    case XOR:
+      st->sat_metric += 4;
+      break;
+    default:
+      assert(0);
   }
-  st->gates[st->num_gates].type = type;
   st->gates[st->num_gates].table = table;
+  st->gates[st->num_gates].type = type;
   st->gates[st->num_gates].in1 = gid1;
   st->gates[st->num_gates].in2 = gid2;
+  st->gates[st->num_gates].in3 = NO_GATE;
+  st->gates[st->num_gates].function = 0;
+  st->num_gates += 1;
+  return st->num_gates - 1;
+}
+
+static inline gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid1, gatenum gid2,
+    gatenum gid3) {
+  if (gid1 == NO_GATE || gid2 == NO_GATE || gid3 == NO_GATE || st->num_gates > st->max_gates) {
+    return NO_GATE;
+  }
+  assert(gid1 < st->num_gates);
+  assert(gid2 < st->num_gates);
+  assert(gid3 < st->num_gates);
+  if (gid1 == gid2 || gid2 == gid3 || gid3 == gid1) {
+    printf("%d %d %d\n", gid1, gid2, gid3);
+  }
+  assert(gid1 != gid2 && gid2 != gid3 && gid3 != gid1);
+  st->gates[st->num_gates].table = table;
+  st->gates[st->num_gates].type = LUT;
+  st->gates[st->num_gates].in1 = gid1;
+  st->gates[st->num_gates].in2 = gid2;
+  st->gates[st->num_gates].in3 = gid3;
+  st->gates[st->num_gates].function = func;
   st->num_gates += 1;
   return st->num_gates - 1;
 }
@@ -171,12 +177,18 @@ static inline gatenum add_and_gate(state *st, gatenum gid1, gatenum gid2) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
+  if (gid1 == gid2) {
+    return gid1;
+  }
   return add_gate(st, AND, st->gates[gid1].table & st->gates[gid2].table, gid1, gid2);
 }
 
 static inline gatenum add_or_gate(state *st, gatenum gid1, gatenum gid2) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
+  }
+  if (gid1 == gid2) {
+    return gid1;
   }
   return add_gate(st, OR, st->gates[gid1].table | st->gates[gid2].table, gid1, gid2);
 }
@@ -279,488 +291,6 @@ static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2,
   return add_xor_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
 }
 
-static gatenum create_circuit(state *st, const ttable target, const ttable mask,
-    const int8_t *inbits, bool andnot_available);
-
-static inline void create_circuit_split(state *st, const ttable target,
-    const ttable mask, const int8_t *inbits, uint8_t bit, bool andnot_available) {
-  assert(st != NULL);
-  assert(inbits != NULL);
-  assert(bit < 8);
-
-  const ttable fsel = st->gates[bit].table; /* Selection bit. */
-
-  state nst_and = *st; /* New state using AND multiplexer. */
-  gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, inbits, andnot_available);
-  gatenum mux_out_and = NO_GATE;
-  if (fb != NO_GATE) {
-    gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel, inbits,
-        andnot_available);
-    gatenum andg = add_and_gate(&nst_and, fc, bit);
-    mux_out_and = add_xor_gate(&nst_and, fb, andg);
-  }
-
-  state nst_or = *st;
-  gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, inbits, andnot_available);
-  gatenum mux_out_or = NO_GATE;
-  if (fd != NO_GATE) {
-    gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel, inbits,
-        andnot_available);
-    gatenum org = add_or_gate(&nst_or, fe, bit);
-    mux_out_or = add_xor_gate(&nst_or, fd, org);
-  }
-  if (mux_out_and == NO_GATE || mux_out_or == NO_GATE) {
-    memset(st, 0, sizeof(state));
-    return;
-  }
-  gatenum mux_out;
-  state nnst;
-  if (mux_out_or == NO_GATE
-      || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
-    nnst = nst_and;
-    mux_out = mux_out_and;
-  } else {
-    nnst = nst_or;
-    mux_out = mux_out_or;
-  }
-  assert(ttable_equals_mask(target, nnst.gates[mux_out].table, mask));
-  *st = nnst;
-  return;
-}
-
-static inline bool create_circuit_parallel(bool *done, state *st, const ttable target,
-    const ttable mask, int8_t *inbits, uint8_t bit, bool andnot_available) {
-  assert(done != NULL);
-  assert(st != NULL);
-  assert(inbits != NULL);
-  assert(g_available_workers >= 0);
-  *done = false;
-  /* Dirty read. */
-  if (g_available_workers == 0) {
-    create_circuit_split(st, target, mask, inbits, bit, andnot_available);
-    *done = true;
-    return false;
-  }
-  pthread_mutex_lock(&g_worker_mutex);
-  if (g_available_workers > 0) {
-    int threadno = 0;
-    assert(g_thread_work != NULL);
-    while (threadno < g_running_threads && g_thread_work[threadno].done != NULL) {
-      threadno += 1;
-    }
-    assert(threadno != g_running_threads);
-    g_available_workers -= 1;
-
-    /* Declare a local thread_work variable and use memcpy to fill g_thread_work from it to get
-       around a bug in gcc. */
-    thread_work work;
-    work.lut = false;
-    work.done = done;
-    work.state.gate = st;
-    work.target = target;
-    work.mask = mask;
-    work.inbits = inbits;
-    work.bit = bit;
-    work.andnot_available = andnot_available;
-    memcpy(g_thread_work + threadno, &work, sizeof(thread_work));
-
-    pthread_cond_broadcast(&g_worker_cond);
-    pthread_mutex_unlock(&g_worker_mutex);
-    return true;
-  } else {
-    pthread_mutex_unlock(&g_worker_mutex);
-    create_circuit_split(st, target, mask, inbits, bit, andnot_available);
-    *done = true;
-    return false;
-  }
-}
-
-/* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
-   paper. */
-static gatenum create_circuit(state *st, const ttable target, const ttable mask,
-    const int8_t *inbits, bool andnot_available) {
-
-  /* 1. Look through the existing circuit. If there is a gate that produces the desired map, simply
-     return the ID of that gate. */
-
-  for (int i = st->num_gates - 1; i >= 0; i--) {
-    if (ttable_equals_mask(target, st->gates[i].table, mask)) {
-      return i;
-    }
-  }
-
-  /* 2. If there are any gates whose inverse produces the desired map, append a NOT gate, and
-     return the ID of the NOT gate. */
-
-  for (int i = st->num_gates - 1; i >= 0; i--) {
-    if (ttable_equals_mask(target, ~st->gates[i].table, mask)) {
-      return add_not_gate(st, i);
-    }
-  }
-
-  /* 3. Look at all pairs of gates in the existing circuit. If they can be combined with a single
-     gate to produce the desired map, add that single gate and return its ID. */
-
-  const ttable mtarget = target & mask;
-  for (int i = st->num_gates - 1; i >= 0; i--) {
-    ttable ti = st->gates[i].table & mask;
-    for (int k = i - 1; k >= 0; k--) {
-      ttable tk = st->gates[k].table & mask;
-      if (ttable_equals(mtarget, ti | tk)) {
-        return add_or_gate(st, i, k);
-      }
-      if (ttable_equals(mtarget, ti & tk)) {
-        return add_and_gate(st, i, k);
-      }
-      if (ttable_equals(mtarget, ti ^ tk)) {
-        return add_xor_gate(st, i, k);
-      }
-      if (andnot_available) {
-        if (ttable_equals_mask(target, ~ti & tk, mask)) {
-          return add_andnot_gate(st, i, k);
-        }
-        if (ttable_equals_mask(target, ~tk & ti, mask)) {
-          return add_andnot_gate(st, k, i);
-        }
-      }
-    }
-  }
-
-  /* 4. Look at all combinations of two or three gates in the circuit. If they can be combined with
-     two gates to produce the desired map, add the gates, and return the ID of the one that produces
-     the desired map. */
-
-  for (int i = st->num_gates - 1; i >= 0; i--) {
-    ttable ti = st->gates[i].table;
-    for (int k = i - 1; k >= 0; k--) {
-      ttable tk = st->gates[k].table;
-      if (ttable_equals_mask(target, ~(ti | tk), mask)) {
-        return add_nor_gate(st, i, k);
-      }
-      if (ttable_equals_mask(target, ~(ti & tk), mask)) {
-        return add_nand_gate(st, i, k);
-      }
-      if (ttable_equals_mask(target, ~(ti ^ tk), mask)) {
-        return add_xnor_gate(st, i, k);
-      }
-      if (ttable_equals_mask(target, ~ti | tk, mask)) {
-        return add_or_not_gate(st, i, k);
-      }
-      if (ttable_equals_mask(target, ~tk | ti, mask)) {
-        return add_or_not_gate(st, k, i);
-      }
-      if (!andnot_available) {
-        if (ttable_equals_mask(target, ~ti & tk, mask)) {
-          return add_and_not_gate(st, i, k);
-        }
-        if (ttable_equals_mask(target, ~tk & ti, mask)) {
-          return add_and_not_gate(st, k, i);
-        }
-      } else if (ttable_equals_mask(target, ~ti & ~tk, mask)) {
-        return add_andnot_gate(st, i, add_not_gate(st, k));
-      }
-    }
-  }
-
-  for (int i = st->num_gates - 1; i >= 0; i--) {
-    ttable ti = st->gates[i].table & mask;
-    for (int k = i - 1; k >= 0; k--) {
-      ttable tk = st->gates[k].table & mask;
-      ttable iandk = ti & tk;
-      ttable iork = ti | tk;
-      ttable ixork = ti ^ tk;
-      for (int m = k - 1; m >= 0; m--) {
-        ttable tm = st->gates[m].table & mask;
-        if (ttable_equals(mtarget, iandk & tm)) {
-          return add_and_3_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, iandk | tm)) {
-          return add_and_or_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, iandk ^ tm)) {
-          return add_and_xor_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, iork | tm)) {
-          return add_or_3_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, iork & tm)) {
-          return add_or_and_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, iork ^ tm)) {
-          return add_or_xor_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, ixork ^ tm)) {
-          return add_xor_3_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, ixork | tm)) {
-          return add_xor_or_gate(st, i, k, m);
-        }
-        if (ttable_equals(mtarget, ixork & tm)) {
-          return add_xor_and_gate(st, i, k, m);
-        }
-        ttable iandm = ti & tm;
-        if (ttable_equals(mtarget, iandm | tk)) {
-          return add_and_or_gate(st, i, m, k);
-        }
-        if (ttable_equals(mtarget, iandm ^ tk)) {
-          return add_and_xor_gate(st, i, m, k);
-        }
-        ttable kandm = tk & tm;
-        if (ttable_equals(mtarget, kandm | ti)) {
-          return add_and_or_gate(st, k, m, i);
-        }
-        if (ttable_equals(mtarget, kandm ^ ti)) {
-          return add_and_xor_gate(st, k, m, i);
-        }
-        ttable ixorm = ti ^ tm;
-        if (ttable_equals(mtarget, ixorm | tk)) {
-          return add_xor_or_gate(st, i, m, k);
-        }
-        if (ttable_equals(mtarget, ixorm & tk)) {
-          return add_xor_and_gate(st, i, m, k);
-        }
-        ttable kxorm = tk ^ tm;
-        if (ttable_equals(mtarget, kxorm | ti)) {
-          return add_xor_or_gate(st, k, m, i);
-        }
-        if (ttable_equals(mtarget, kxorm & ti)) {
-          return add_xor_and_gate(st, k, m, i);
-        }
-        ttable iorm = ti | tm;
-        if (ttable_equals(mtarget, iorm & tk)) {
-          return add_or_and_gate(st, i, m, k);
-        }
-        if (ttable_equals(mtarget, iorm ^ tk)) {
-          return add_or_xor_gate(st, i, m, k);
-        }
-        ttable korm = tk | tm;
-        if (ttable_equals(mtarget, korm & ti)) {
-          return add_or_and_gate(st, k, m, i);
-        }
-        if (ttable_equals(mtarget, korm ^ ti)) {
-          return add_or_xor_gate(st, k, m, i);
-        }
-        if (andnot_available) {
-          if (ttable_equals(mtarget, ti | (~tk & tm))) {
-            return add_andnot_or_gate(st, k, m, i);
-          }
-          if (ttable_equals(mtarget, ti | (tk & ~tm))) {
-            return add_andnot_or_gate(st, m, k, i);
-          }
-          if (ttable_equals(mtarget, tm | (~ti & tk))) {
-            return add_andnot_or_gate(st, i, k, m);
-          }
-          if (ttable_equals(mtarget, tm | (ti & ~tk))) {
-            return add_andnot_or_gate(st, k, i, m);
-          }
-          if (ttable_equals(mtarget, tk | (~ti & tm))) {
-            return add_andnot_or_gate(st, i, m, k);
-          }
-          if (ttable_equals(mtarget, tk | (ti & ~tm))) {
-            return add_andnot_or_gate(st, m, i, k);
-          }
-          if (ttable_equals(mtarget, ~ti & (tk ^ tm))) {
-            return add_xor_andnot_a_gate(st, k, m, i);
-          }
-          if (ttable_equals(mtarget, ~tk & (ti ^ tm))) {
-            return add_xor_andnot_a_gate(st, i, m, k);
-          }
-          if (ttable_equals(mtarget, ~tm & (tk ^ ti))) {
-            return add_xor_andnot_a_gate(st, k, i, m);
-          }
-          if (ttable_equals(mtarget, ti & ~(tk ^ tm))) {
-            return add_xor_andnot_b_gate(st, k, m, i);
-          }
-          if (ttable_equals(mtarget, tk & ~(ti ^ tm))) {
-            return add_xor_andnot_b_gate(st, i, m, k);
-          }
-          if (ttable_equals(mtarget, tm & ~(tk ^ ti))) {
-            return add_xor_andnot_b_gate(st, k, i, m);
-          }
-          if (ttable_equals(mtarget, ~ti & tk & tm)) {
-            return add_and_andnot_gate(st, i, k, m);
-          }
-          if (ttable_equals(mtarget, ti & ~tk & tm)) {
-            return add_and_andnot_gate(st, k, i, m);
-          }
-          if (ttable_equals(mtarget, ti & tk & ~tm)) {
-            return add_and_andnot_gate(st, m, k, i);
-          }
-          if (ttable_equals(mtarget, ~ti & ~tk & tm)) {
-            return add_andnot_3_a_gate(st, i, k, m);
-          }
-          if (ttable_equals(mtarget, ~ti & tk & ~tm)) {
-            return add_andnot_3_a_gate(st, i, m, k);
-          }
-          if (ttable_equals(mtarget, ti & ~tk & ~tm)) {
-            return add_andnot_3_a_gate(st, k, m, i);
-          }
-          if (ttable_equals(mtarget, ti & ~(~tk & tm))) {
-            return add_andnot_3_b_gate(st, k, m, i);
-          }
-          if (ttable_equals(mtarget, ti & ~(tk & ~tm))) {
-            return add_andnot_3_b_gate(st, m, k, i);
-          }
-          if (ttable_equals(mtarget, tk & ~(~ti & tm))) {
-            return add_andnot_3_b_gate(st, i, m, k);
-          }
-          if (ttable_equals(mtarget, tk & ~(ti & ~tm))) {
-            return add_andnot_3_b_gate(st, m, i, k);
-          }
-          if (ttable_equals(mtarget, tm & ~(~tk & ti))) {
-            return add_andnot_3_b_gate(st, k, i, m);
-          }
-          if (ttable_equals(mtarget, tm & ~(tk & ~ti))) {
-            return add_andnot_3_b_gate(st, i, k, m);
-          }
-          if (ttable_equals(mtarget, ti ^ (~tk & tm))) {
-            return add_andnot_xor_gate(st, k, m, i);
-          }
-          if (ttable_equals(mtarget, ti ^ (tk & ~tm))) {
-            return add_andnot_xor_gate(st, m, k, i);
-          }
-          if (ttable_equals(mtarget, tk ^ (~ti & tm))) {
-            return add_andnot_xor_gate(st, i, m, k);
-          }
-          if (ttable_equals(mtarget, tk ^ (ti & ~tm))) {
-            return add_andnot_xor_gate(st, m, i, k);
-          }
-          if (ttable_equals(mtarget, tm ^ (~tk & ti))) {
-            return add_andnot_xor_gate(st, k, i, m);
-          }
-          if (ttable_equals(mtarget, tm ^ (tk & ~ti))) {
-            return add_andnot_xor_gate(st, i, k, m);
-          }
-        }
-      }
-    }
-  }
-
-  /* 5. Use the specified input bit to select between two Karnaugh maps. Call this function
-     recursively to generate those two maps. */
-
-  /* Copy input bits already used to new array to avoid modifying the old one. */
-  int8_t next_inbits[64];
-  uint8_t bitp = 0;
-  while (bitp < 6 && inbits[bitp] != -1) {
-    next_inbits[bitp] = inbits[bitp];
-    bitp += 1;
-  }
-  assert(bitp < 6);
-  next_inbits[bitp] = -1;
-  next_inbits[bitp + 1] = -1;
-
-  bool state_done[8];
-  state new_states[8];
-  memset(new_states, 0, 8 * sizeof(state));
-
-  bool thread_used = false;
-
-  /* Try all input bit orders. */
-  for (int bit = 0; bit < 8; bit++) {
-    bool skip = false;
-    for (int i = 0; i < bitp; i++) {
-      if (inbits[i] == bit) {
-        skip = true;
-        break;
-      }
-    }
-    if (skip) {
-      state_done[bit] = true;
-      continue;
-    }
-    state_done[bit] = false;
-    if (bit != 0) {
-      memcpy(next_inbits + 8 * bit, next_inbits, 8 * sizeof(int8_t));
-    }
-    new_states[bit] = *st;
-    next_inbits[8 * bit + bitp] = bit;
-
-    if (create_circuit_parallel(state_done + bit, new_states + bit, target, mask,
-        next_inbits + 8 * bit, bit, andnot_available)) {
-      thread_used = true;
-    }
-  }
-
-  bool alldone = false;
-  int wait = 1;
-  while (thread_used && !alldone) {
-    for (int i = 0; i < 8; i++) {
-      alldone = true;
-      if (!state_done[i]) {
-        alldone = false;
-        break;
-      }
-    }
-    if (!alldone) {
-      usleep(wait);
-      if (wait < 10) {
-        wait *= 2;
-      }
-    }
-  }
-
-  state best;
-  best.num_gates = 0;
-
-  for (int i = 0; i < 8; i++) {
-    if (new_states[i].num_gates == 0) {
-      continue;
-    }
-    if (best.num_gates == 0 || best.num_gates > new_states[i].num_gates) {
-      best = new_states[i];
-    }
-  }
-  if (best.num_gates == 0) {
-    return NO_GATE;
-  }
-  *st = best;
-  if (g_verbosity > 1) {
-    printf("Level: %d Best: %d\n", bitp, best.num_gates - 1);
-  }
-  assert(ttable_equals_mask(target, st->gates[st->num_gates - 1].table, mask));
-  return st->num_gates - 1;
-}
-
-static inline gatenum add_lut(lut_state *st, const uint8_t function, const ttable table,
-    const gatenum in1, const gatenum in2, const gatenum in3) {
-  if (in1 == NO_GATE || in2 == NO_GATE || in3 == NO_GATE) {
-    return NO_GATE;
-  }
-  assert(in1 < st->num_luts);
-  assert(in2 < st->num_luts);
-  assert(in3 < st->num_luts);
-  if (st->num_luts >= st->max_luts) {
-    return NO_GATE;
-  }
-  st->luts[st->num_luts].type = LUT;
-  st->luts[st->num_luts].function = function;
-  st->luts[st->num_luts].table = table;
-  st->luts[st->num_luts].in1 = in1;
-  st->luts[st->num_luts].in2 = in2;
-  st->luts[st->num_luts].in3 = in3;
-  st->num_luts += 1;
-  return st->num_luts - 1;
-}
-
-static inline gatenum add_lut_gate(lut_state *st, const gate_type type, const ttable table,
-    const gatenum in1, const gatenum in2) {
-  assert(type == NOT || type == AND || type == OR || type == XOR);
-  assert(in1 < st->num_luts);
-  assert(type == NOT || in2 < st->num_luts);
-  if (st->num_luts >= st->max_luts) {
-    return NO_GATE;
-  }
-  st->luts[st->num_luts].type = type;
-  st->luts[st->num_luts].function = 0;
-  st->luts[st->num_luts].table = table;
-  st->luts[st->num_luts].in1 = in1;
-  st->luts[st->num_luts].in2 = in2;
-  st->luts[st->num_luts].in3 = NO_GATE;
-  st->num_luts += 1;
-  return st->num_luts - 1;
-}
-
 static inline ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
     const ttable in3) {
   ttable ret = _mm256_setzero_si256();
@@ -789,89 +319,6 @@ static inline ttable generate_lut_ttable(const uint8_t function, const ttable in
     ret |= in1 & in2 & in3;
   }
   return ret;
-}
-
-static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
-    const int8_t *inbits, bool andnot_available);
-
-static inline void create_lut_circuit_split(lut_state *st, const ttable target,
-    const ttable mask, const int8_t *inbits, uint8_t bit, bool andnot_available) {
-  assert(st != NULL);
-  assert(inbits != NULL);
-  assert(bit < 8);
-
-  const ttable fsel = st->luts[bit].table; /* Selection bit. */
-  lut_state nnst = *st;
-
-  gatenum fb = create_lut_circuit(&nnst, target, mask & ~fsel, inbits, andnot_available);
-  if (fb == NO_GATE) {
-    memset(st, 0, sizeof(lut_state));
-    return;
-  }
-
-  gatenum fc = create_lut_circuit(&nnst, target, mask & fsel, inbits, andnot_available);
-  if (fc == NO_GATE) {
-    memset(st, 0, sizeof(lut_state));
-    return;
-  }
-
-  ttable mux_table = generate_lut_ttable(0xac, nnst.luts[bit].table, nnst.luts[fb].table,
-      nnst.luts[fc].table);
-  gatenum out = add_lut(&nnst, 0xac, mux_table, bit, fb, fc);
-  if (out == NO_GATE) {
-    memset(st, 0, sizeof(lut_state));
-    return;
-  }
-  assert(ttable_equals_mask(target, nnst.luts[out].table, mask));
-  *st = nnst;
-  return;
-}
-
-static inline bool create_lut_circuit_parallel(bool *done, lut_state *st, const ttable target,
-    const ttable mask, int8_t *inbits, uint8_t bit, bool andnot_available) {
-  assert(done != NULL);
-  assert(st != NULL);
-  assert(inbits != NULL);
-  assert(g_available_workers >= 0);
-  *done = false;
-  /* Dirty read. */
-  if (g_available_workers == 0) {
-    create_lut_circuit_split(st, target, mask, inbits, bit, andnot_available);
-    *done = true;
-    return false;
-  }
-  pthread_mutex_lock(&g_worker_mutex);
-  if (g_available_workers > 0) {
-    int threadno = 0;
-    assert(g_thread_work != NULL);
-    while (threadno < g_running_threads && g_thread_work[threadno].done != NULL) {
-      threadno += 1;
-    }
-    assert(threadno != g_running_threads);
-    g_available_workers -= 1;
-
-    /* Declare a local thread_work variable and use memcpy to fill g_thread_work from it to get
-       around a bug in gcc. */
-    thread_work work;
-    work.lut = true;
-    work.done = done;
-    work.state.lut = st;
-    work.target = target;
-    work.mask = mask;
-    work.inbits = inbits;
-    work.bit = bit;
-    work.andnot_available = andnot_available;
-    memcpy(g_thread_work + threadno, &work, sizeof(thread_work));
-
-    pthread_cond_broadcast(&g_worker_cond);
-    pthread_mutex_unlock(&g_worker_mutex);
-    return true;
-  } else {
-    pthread_mutex_unlock(&g_worker_mutex);
-    create_lut_circuit_split(st, target, mask, inbits, bit, andnot_available);
-    *done = true;
-    return false;
-  }
 }
 
 static inline void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3,
@@ -1017,25 +464,58 @@ static inline bool check_7lut_possible(const ttable target, const ttable mask, c
   return ttable_equals_mask(target, match, mask);
 }
 
-/* Recursively builds a network of 3-bit LUTs. */
-static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttable mask,
-    const int8_t *inbits, bool andnot_available) {
+/* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
+   paper. */
+static gatenum create_circuit(state *st, const ttable target, const ttable mask,
+    const int8_t *inbits, const bool andnot, const bool lut, const bool randomize) {
 
-  /* 1. Look through the existing circuit. If there is a LUT that produces the desired map, simply
+  gatenum gate_order[MAX_GATES];
+  for (int i = 0; i < st->num_gates; i++) {
+    gate_order[i] = st->num_gates - 1 - i;
+  }
+
+  if (randomize) {
+    if (g_rand_fp == NULL) {
+      g_rand_fp = fopen("/dev/urandom", "r");
+    }
+    if (g_rand_fp == NULL) {
+      fprintf(stderr, "Error when opening /dev/urandom.\n");
+    } else {
+      /* Fisher-Yates shuffle */
+      uint32_t rand = 17;
+      do {
+        if (fread(&rand, sizeof(uint32_t), 1, g_rand_fp) != 1) {
+          fprintf(stderr, "Error when reading from /dev/urandom.\n");
+        }
+      } while (rand == 0);
+      for (uint32_t i = st->num_gates - 1; i > 0; i--) {
+        uint32_t j = rand % (i + 1);
+        gatenum t = gate_order[i];
+        gate_order[i] = gate_order[j];
+        gate_order[j] = t;
+        /* xorshift */
+        rand ^= rand >> 13;
+        rand ^= rand << 17;
+        rand ^= rand >> 5;
+      }
+    }
+  }
+
+  /* 1. Look through the existing circuit. If there is a gate that produces the desired map, simply
      return the ID of that gate. */
 
-  for (int i = st->num_luts - 1; i >= 0; i--) {
-    if (ttable_equals_mask(target, st->luts[i].table, mask)) {
-      return i;
+  for (int i = 0; i < st->num_gates; i++) {
+    if (ttable_equals_mask(target, st->gates[gate_order[i]].table, mask)) {
+      return gate_order[i];
     }
   }
 
   /* 2. If there are any gates whose inverse produces the desired map, append a NOT gate, and
      return the ID of the NOT gate. */
 
-  for (int i = st->num_luts - 1; i >= 0; i--) {
-    if (ttable_equals_mask(target, ~st->luts[i].table, mask)) {
-      return add_lut_gate(st, NOT, ~st->luts[i].table, i, NO_GATE);
+  for (int i = 0; i < st->num_gates; i++) {
+    if (ttable_equals_mask(target, ~st->gates[gate_order[i]].table, mask)) {
+      return add_not_gate(st, gate_order[i]);
     }
   }
 
@@ -1043,160 +523,166 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
      gate to produce the desired map, add that single gate and return its ID. */
 
   const ttable mtarget = target & mask;
-  for (int i = st->num_luts - 1; i >= 0; i--) {
-    ttable ti = st->luts[i].table & mask;
-    for (int k = i - 1; k >= 0; k--) {
-      ttable tk = st->luts[k].table & mask;
+  for (int i = 0; i < st->num_gates; i++) {
+    const gatenum gi = gate_order[i];
+    const ttable ti = st->gates[gi].table & mask;
+    for (int k = i + 1; k < st->num_gates; k++) {
+      const gatenum gk = gate_order[k];
+      const ttable tk = st->gates[gk].table & mask;
       if (ttable_equals(mtarget, ti | tk)) {
-        return add_lut_gate(st, OR, st->luts[i].table | st->luts[k].table, i, k);
+        return add_or_gate(st, gi, gk);
       }
       if (ttable_equals(mtarget, ti & tk)) {
-        return add_lut_gate(st, AND, st->luts[i].table & st->luts[k].table, i, k);
+        return add_and_gate(st, gi, gk);
       }
       if (ttable_equals(mtarget, ti ^ tk)) {
-        return add_lut_gate(st, XOR, st->luts[i].table ^ st->luts[k].table, i, k);
+        return add_xor_gate(st, gi, gk);
       }
-      if (andnot_available) {
-        if (ttable_equals(mtarget, ~ti & tk)) {
-          return add_lut_gate(st, ANDNOT, ~st->luts[i].table & st->luts[k].table, i, k);
+      if (andnot) {
+        if (ttable_equals_mask(target, ~ti & tk, mask)) {
+          return add_andnot_gate(st, gi, gk);
         }
-        if (ttable_equals(mtarget, ~tk & ti)) {
-          return add_lut_gate(st, ANDNOT, ~st->luts[k].table & st->luts[i].table, k, i);
+        if (ttable_equals_mask(target, ~tk & ti, mask)) {
+          return add_andnot_gate(st, gk, gi);
         }
-      }
-    }
-  }
-
-  /* Look through all combinations of three gates in the circuit. For each combination, check if
-     any of the 256 possible three bit boolean functions produces the desired map. If so, add that
-     LUT and return the ID. */
-  for (int i = st->num_luts - 1; i >= 0; i--) {
-    const ttable ta = st->luts[i].table;
-    for (int k = i - 1; k >= 0; k--) {
-      const ttable tb = st->luts[k].table;
-      for (int m = k - 1; m >= 0; m--) {
-        const ttable tc = st->luts[m].table;
-        if (!check_3lut_possible(target, mask, ta, tb, tc)) {
-          continue;
-        }
-        uint8_t func;
-        if (!get_lut_function(ta, tb, tc, target, mask, &func)) {
-          continue;
-        }
-        ttable nt = generate_lut_ttable(func, ta, tb, tc);
-        assert(ttable_equals_mask(target, nt, mask));
-        return add_lut(st, func, nt, i, k, m);
       }
     }
   }
 
-  /* Look through all combinations of five gates in the circuit. For each combination, check if
-     a combination of two of the possible 256 three bit boolean functions as in LUT(LUT(a,b,c),d,e)
-     produces the desired map. If so, add those LUTs and return the ID of the output LUT. */
+  if (lut) {
+    /* Look through all combinations of three gates in the circuit. For each combination, check if
+       any of the 256 possible three bit boolean functions produces the desired map. If so, add that
+       LUT and return the ID. */
+    for (int i = 0; i < st->num_gates; i++) {
+      const gatenum gi = gate_order[i];
+      const ttable ta = st->gates[gi].table;
+      for (int k = i + 1; k < st->num_gates; k++) {
+        const gatenum gk = gate_order[k];
+        const ttable tb = st->gates[gk].table;
+        for (int m = k + 1; m < st->num_gates; m++) {
+          const gatenum gm = gate_order[m];
+          const ttable tc = st->gates[gm].table;
+          if (!check_3lut_possible(target, mask, ta, tb, tc)) {
+            continue;
+          }
+          uint8_t func;
+          if (!get_lut_function(ta, tb, tc, target, mask, &func)) {
+            continue;
+          }
+          ttable nt = generate_lut_ttable(func, ta, tb, tc);
+          assert(ttable_equals_mask(target, nt, mask));
+          return add_lut(st, func, nt, gi, gk, gm);
+        }
+      }
+    }
 
-  struct timeval before;
-  if (g_verbosity > 2) {
-    gettimeofday(&before, NULL);
-  }
+    /* Look through all combinations of five gates in the circuit. For each combination, check if
+       a combination of two of the possible 256 three bit boolean functions as in
+       LUT(LUT(a,b,c),d,e) produces the desired map. If so, add those LUTs and return the ID of the
+       output LUT. */
 
-  for (int i = st->num_luts - 1; i >= 0; i--) {
-    const ttable ta = st->luts[i].table;
-    for (int k = i - 1; k >= 0; k--) {
-      const ttable tb = st->luts[k].table;
-      for (int m = k - 1; m >= 0; m--) {
-        const ttable tc = st->luts[m].table;
-        bool cache_set = false;
-        ttable cache[256];
-        for (int o = m - 1; o >= 0; o--) {
-          const ttable td = st->luts[o].table;
-          for (int q = o - 1; q >= 0; q--) {
-            const ttable te = st->luts[q].table;
-            if (!check_5lut_possible(target, mask, ta, tb, tc, td, te)) {
-              continue;
-            }
-            if (!cache_set) {
-              generate_lut_ttables(ta, tb, tc, cache);
-              cache_set = true;
-            }
-            for (int func_outer = 0; func_outer < 256; func_outer++) {
-              ttable t_outer = cache[func_outer];
-              uint8_t func_inner;
-              if (!get_lut_function(t_outer, td, te, target, mask, &func_inner)) {
+    for (int i = 0; i < st->num_gates; i++) {
+      const gatenum gi = gate_order[i];
+      const ttable ta = st->gates[gi].table;
+      for (int k = i + 1; k < st->num_gates; k++) {
+        const gatenum gk = gate_order[k];
+        const ttable tb = st->gates[gk].table;
+        for (int m = k + 1; m < st->num_gates; m++) {
+          const gatenum gm = gate_order[m];
+          const ttable tc = st->gates[gm].table;
+          bool cache_set = false;
+          ttable cache[256];
+          for (int o = m + 1; o < st->num_gates; o++) {
+            const gatenum go = gate_order[o];
+            const ttable td = st->gates[go].table;
+            for (int q = o + 1; q < st->num_gates; q++) {
+              const gatenum gq = gate_order[q];
+              const ttable te = st->gates[gq].table;
+              if (!check_5lut_possible(target, mask, ta, tb, tc, td, te)) {
                 continue;
               }
-              ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
-              assert(ttable_equals_mask(target, t_inner, mask));
-              if (g_verbosity > 2) {
-                printf("Found 5LUT!\n");
+              if (!cache_set) {
+                generate_lut_ttables(ta, tb, tc, cache);
+                cache_set = true;
               }
-              return add_lut(st, func_inner, t_inner, add_lut(st, func_outer, t_outer, i, k, m),
-                  o, q);
+              for (int func_outer = 0; func_outer < 256; func_outer++) {
+                ttable t_outer = cache[func_outer];
+                uint8_t func_inner;
+                if (!get_lut_function(t_outer, td, te, target, mask, &func_inner)) {
+                  continue;
+                }
+                ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
+                assert(ttable_equals_mask(target, t_inner, mask));
+                if (g_verbosity > 2) {
+                  printf("Found 5LUT!\n");
+                }
+                return add_lut(st, func_inner, t_inner,
+                    add_lut(st, func_outer, t_outer, gi, gk, gm), go, gq);
+              }
             }
           }
         }
       }
     }
-  }
 
-  if (g_verbosity > 2) {
-    struct timeval after;
-    gettimeofday(&after, NULL);
-    double millisecs = (after.tv_sec - before.tv_sec) * 1000.0
-        + (after.tv_usec - before.tv_usec) / 1000.0;
-    printf("5LUT loop num luts: %" PRIgatenum " Time: %.1f ms\n", st->num_luts, millisecs);
-    gettimeofday(&before, NULL);
-  }
+    /* Look through all combinations of seven gates in the circuit. For each combination, check if
+       a combination of three of the possible 256 three bit boolean functions as in
+       LUT(LUT(a,b,c),LUT(d,e,f),g) produces the desired map. If so, add those LUTs and return the
+       ID of the output LUT. */
 
-  /* Look through all combinations of seven gates in the circuit. For each combination, check if
-     a combination of three of the possible 256 three bit boolean functions as in
-     LUT(LUT(a,b,c),LUT(d,e,f),g) produces the desired map. If so, add those LUTs and return the ID
-     of the output LUT. */
-
-  for (int i = st->num_luts - 1; i >= 0; i--) {
-    const ttable ta = st->luts[i].table;
-    for (int k = i - 1; k >= 0; k--) {
-      const ttable tb = st->luts[k].table;
-      for (int m = k - 1; m >= 0; m--) {
-        const ttable tc = st->luts[m].table;
-        bool outer_cache_set = false;
-        ttable outer_cache[256];
-        for (int o = m - 1; o >= 0; o--) {
-          const ttable td = st->luts[o].table;
-          for (int q = o - 1; q >= 0; q--) {
-            const ttable te = st->luts[q].table;
-            for (int s = q - 1; s >= 0; s--) {
-              const ttable tf = st->luts[s].table;
-              bool middle_cache_set = false;
-              ttable middle_cache[256];
-              for (int u = s - 1; u >= 0; u--) {
-                const ttable tg = st->luts[u].table;
-                if (!check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg)) {
-                  continue;
-                }
-                if (!outer_cache_set) {
-                  generate_lut_ttables(ta, tb, tc, outer_cache);
-                  outer_cache_set = true;
-                }
-                if (!middle_cache_set) {
-                  generate_lut_ttables(td, te, tf, middle_cache);
-                  middle_cache_set = true;
-                }
-                for (int func_outer = 0; func_outer < 256; func_outer++) {
-                  ttable t_outer = outer_cache[func_outer];
-                  for (int func_middle = 0; func_middle < 256; func_middle++) {
-                    ttable t_middle = middle_cache[func_middle];
-                    uint8_t func_inner;
-                    if (!get_lut_function(t_outer, t_middle, tg, target, mask, &func_inner)) {
-                      continue;
+    for (int i = 0; i < st->num_gates; i++) {
+      const gatenum gi = gate_order[i];
+      const ttable ta = st->gates[gi].table;
+      for (int k = i + 1; k < st->num_gates; k++) {
+        const gatenum gk = gate_order[k];
+        const ttable tb = st->gates[gk].table;
+        for (int m = k + 1; m < st->num_gates; m++) {
+          const gatenum gm = gate_order[m];
+          const ttable tc = st->gates[gm].table;
+          bool outer_cache_set = false;
+          ttable outer_cache[256];
+          for (int o = m + 1; o < st->num_gates; o++) {
+            const gatenum go = gate_order[o];
+            const ttable td = st->gates[go].table;
+            for (int q = o + 1; q < st->num_gates; q++) {
+              const gatenum gq = gate_order[q];
+              const ttable te = st->gates[gq].table;
+              for (int s = q + 1; s < st->num_gates; s++) {
+                const gatenum gs = gate_order[s];
+                const ttable tf = st->gates[gs].table;
+                bool middle_cache_set = false;
+                ttable middle_cache[256];
+                for (int u = s + 1; u < st->num_gates; u++) {
+                  const gatenum gu = gate_order[u];
+                  const ttable tg = st->gates[gu].table;
+                  if (!check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg)) {
+                    continue;
+                  }
+                  if (!outer_cache_set) {
+                    generate_lut_ttables(ta, tb, tc, outer_cache);
+                    outer_cache_set = true;
+                  }
+                  if (!middle_cache_set) {
+                    generate_lut_ttables(td, te, tf, middle_cache);
+                    middle_cache_set = true;
+                  }
+                  for (int func_outer = 0; func_outer < 256; func_outer++) {
+                    ttable t_outer = outer_cache[func_outer];
+                    for (int func_middle = 0; func_middle < 256; func_middle++) {
+                      ttable t_middle = middle_cache[func_middle];
+                      uint8_t func_inner;
+                      if (!get_lut_function(t_outer, t_middle, tg, target, mask, &func_inner)) {
+                        continue;
+                      }
+                      ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+                      assert(ttable_equals_mask(target, t_inner, mask));
+                      if (g_verbosity > 2) {
+                        printf("Found 7LUT!\n");
+                      }
+                      return add_lut(st, func_inner, t_inner,
+                          add_lut(st, func_outer, t_outer, gi, gk, gm),
+                          add_lut(st, func_middle, t_middle, go, gq, gs), gu);
                     }
-                    ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
-                    assert(ttable_equals_mask(target, t_inner, mask));
-                    if (g_verbosity > 2) {
-                      printf("Found 7LUT!\n");
-                    }
-                    return add_lut(st, func_inner, t_inner,
-                        add_lut(st, func_outer, t_outer, i, k, m),
-                        add_lut(st, func_middle, t_middle, o, q, s), u);
                   }
                 }
               }
@@ -1205,100 +691,346 @@ static gatenum create_lut_circuit(lut_state *st, const ttable target, const ttab
         }
       }
     }
+
+  } else {
+    /* 4. Look at all combinations of two or three gates in the circuit. If they can be combined
+       with two gates to produce the desired map, add the gates, and return the ID of the one that
+       produces the desired map. */
+
+    for (int i = 0; i < st->num_gates; i++) {
+      const gatenum gi = gate_order[i];
+      ttable ti = st->gates[gi].table;
+      for (int k = i + 1; k < st->num_gates; k++) {
+        const gatenum gk = gate_order[k];
+        ttable tk = st->gates[gk].table;
+        if (ttable_equals_mask(target, ~(ti | tk), mask)) {
+        return add_nor_gate(st, gi, gk);
+        }
+        if (ttable_equals_mask(target, ~(ti & tk), mask)) {
+          return add_nand_gate(st, gi, gk);
+        }
+        if (ttable_equals_mask(target, ~(ti ^ tk), mask)) {
+          return add_xnor_gate(st, gi, gk);
+        }
+        if (ttable_equals_mask(target, ~ti | tk, mask)) {
+          return add_or_not_gate(st, gi, gk);
+        }
+        if (ttable_equals_mask(target, ~tk | ti, mask)) {
+          return add_or_not_gate(st, gk, gi);
+        }
+        if (!andnot) {
+          if (ttable_equals_mask(target, ~ti & tk, mask)) {
+            return add_and_not_gate(st, gi, gk);
+          }
+          if (ttable_equals_mask(target, ~tk & ti, mask)) {
+            return add_and_not_gate(st, gk, gi);
+          }
+        } else if (ttable_equals_mask(target, ~ti & ~tk, mask)) {
+          return add_andnot_gate(st, gi, add_not_gate(st, gk));
+        }
+      }
+    }
+
+    for (int i = 0; i < st->num_gates; i++) {
+      const gatenum gi = gate_order[i];
+      ttable ti = st->gates[gi].table & mask;
+      for (int k = i + 1; k < st->num_gates; k++) {
+        const gatenum gk = gate_order[k];
+        ttable tk = st->gates[gk].table & mask;
+        ttable iandk = ti & tk;
+        ttable iork = ti | tk;
+        ttable ixork = ti ^ tk;
+        for (int m = k + 1; m < st->num_gates; m++) {
+          const gatenum gm = gate_order[m];
+          ttable tm = st->gates[gm].table & mask;
+          if (!check_3lut_possible(target, mask, ti, tk, tm)) {
+            continue;
+          }
+          if (ttable_equals(mtarget, iandk & tm)) {
+            return add_and_3_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iandk | tm)) {
+            return add_and_or_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iandk ^ tm)) {
+            return add_and_xor_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iork | tm)) {
+            return add_or_3_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iork & tm)) {
+            return add_or_and_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iork ^ tm)) {
+            return add_or_xor_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, ixork ^ tm)) {
+            return add_xor_3_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, ixork | tm)) {
+            return add_xor_or_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, ixork & tm)) {
+            return add_xor_and_gate(st, gi, gk, gm);
+          }
+          ttable iandm = ti & tm;
+          if (ttable_equals(mtarget, iandm | tk)) {
+            return add_and_or_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, iandm ^ tk)) {
+            return add_and_xor_gate(st, gi, gm, gk);
+          }
+          ttable kandm = tk & tm;
+          if (ttable_equals(mtarget, kandm | ti)) {
+            return add_and_or_gate(st, gk, gm, gi);
+          }
+          if (ttable_equals(mtarget, kandm ^ ti)) {
+            return add_and_xor_gate(st, gk, gm, gi);
+          }
+          ttable ixorm = ti ^ tm;
+          if (ttable_equals(mtarget, ixorm | tk)) {
+            return add_xor_or_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, ixorm & tk)) {
+            return add_xor_and_gate(st, gi, gm, gk);
+          }
+          ttable kxorm = tk ^ tm;
+          if (ttable_equals(mtarget, kxorm | ti)) {
+            return add_xor_or_gate(st, gk, gm, gi);
+          }
+          if (ttable_equals(mtarget, kxorm & ti)) {
+            return add_xor_and_gate(st, gk, gm, gi);
+          }
+          ttable iorm = ti | tm;
+          if (ttable_equals(mtarget, iorm & tk)) {
+            return add_or_and_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, iorm ^ tk)) {
+            return add_or_xor_gate(st, gi, gm, gk);
+          }
+          ttable korm = tk | tm;
+          if (ttable_equals(mtarget, korm & ti)) {
+            return add_or_and_gate(st, gk, gm, gi);
+          }
+          if (ttable_equals(mtarget, korm ^ ti)) {
+            return add_or_xor_gate(st, gk, gm, gi);
+          }
+          if (andnot) {
+            if (ttable_equals(mtarget, ti | (~tk & tm))) {
+              return add_andnot_or_gate(st, gk, gm, gi);
+            }
+            if (ttable_equals(mtarget, ti | (tk & ~tm))) {
+              return add_andnot_or_gate(st, gm, gk, gi);
+            }
+            if (ttable_equals(mtarget, tm | (~ti & tk))) {
+              return add_andnot_or_gate(st, gi, gk, gm);
+            }
+            if (ttable_equals(mtarget, tm | (ti & ~tk))) {
+              return add_andnot_or_gate(st, gk, gi, gm);
+            }
+            if (ttable_equals(mtarget, tk | (~ti & tm))) {
+              return add_andnot_or_gate(st, gi, gm, gk);
+            }
+            if (ttable_equals(mtarget, tk | (ti & ~tm))) {
+              return add_andnot_or_gate(st, gm, gi, gk);
+            }
+            if (ttable_equals(mtarget, ~ti & tk & tm)) {
+              return add_and_andnot_gate(st, gi, gk, gm);
+            }
+            if (ttable_equals(mtarget, ti & ~tk & tm)) {
+              return add_and_andnot_gate(st, gk, gi, gm);
+            }
+            if (ttable_equals(mtarget, ti & tk & ~tm)) {
+              return add_and_andnot_gate(st, gm, gk, gi);
+            }
+            if (ttable_equals(mtarget, ~ti & ~tk & tm)) {
+              return add_andnot_3_a_gate(st, gi, gk, gm);
+            }
+            if (ttable_equals(mtarget, ~ti & tk & ~tm)) {
+              return add_andnot_3_a_gate(st, gi, gm, gk);
+            }
+            if (ttable_equals(mtarget, ti & ~tk & ~tm)) {
+              return add_andnot_3_a_gate(st, gk, gm, gi);
+            }
+            if (ttable_equals(mtarget, ti & ~(~tk & tm))) {
+              return add_andnot_3_b_gate(st, gk, gm, gi);
+            }
+            if (ttable_equals(mtarget, ti & ~(tk & ~tm))) {
+              return add_andnot_3_b_gate(st, gm, gk, gi);
+            }
+            if (ttable_equals(mtarget, tk & ~(~ti & tm))) {
+              return add_andnot_3_b_gate(st, gi, gm, gk);
+            }
+            if (ttable_equals(mtarget, tk & ~(ti & ~tm))) {
+              return add_andnot_3_b_gate(st, gm, gi, gk);
+            }
+            if (ttable_equals(mtarget, tm & ~(~tk & ti))) {
+              return add_andnot_3_b_gate(st, gk, gi, gm);
+            }
+            if (ttable_equals(mtarget, tm & ~(tk & ~ti))) {
+              return add_andnot_3_b_gate(st, gi, gk, gm);
+            }
+            if (ttable_equals(mtarget, ~ti & (tk ^ tm))) {
+              return add_xor_andnot_a_gate(st, gk, gm, gi);
+            }
+            if (ttable_equals(mtarget, ~tk & (ti ^ tm))) {
+              return add_xor_andnot_a_gate(st, gi, gm, gk);
+            }
+            if (ttable_equals(mtarget, ~tm & (tk ^ ti))) {
+              return add_xor_andnot_a_gate(st, gk, gi, gm);
+            }
+            if (ttable_equals(mtarget, ti & ~(tk ^ tm))) {
+              return add_xor_andnot_b_gate(st, gk, gm, gi);
+            }
+            if (ttable_equals(mtarget, tk & ~(ti ^ tm))) {
+              return add_xor_andnot_b_gate(st, gi, gm, gk);
+            }
+            if (ttable_equals(mtarget, tm & ~(tk ^ ti))) {
+              return add_xor_andnot_b_gate(st, gk, gi, gm);
+            }
+            if (ttable_equals(mtarget, ti ^ (~tk & tm))) {
+              return add_andnot_xor_gate(st, gk, gm, gi);
+            }
+            if (ttable_equals(mtarget, ti ^ (tk & ~tm))) {
+              return add_andnot_xor_gate(st, gm, gk, gi);
+            }
+            if (ttable_equals(mtarget, tk ^ (~ti & tm))) {
+              return add_andnot_xor_gate(st, gi, gm, gk);
+            }
+            if (ttable_equals(mtarget, tk ^ (ti & ~tm))) {
+              return add_andnot_xor_gate(st, gm, gi, gk);
+            }
+            if (ttable_equals(mtarget, tm ^ (~tk & ti))) {
+              return add_andnot_xor_gate(st, gk, gi, gm);
+            }
+            if (ttable_equals(mtarget, tm ^ (tk & ~ti))) {
+              return add_andnot_xor_gate(st, gi, gk, gm);
+            }
+          }
+        }
+      }
+    }
   }
 
-  if (g_verbosity > 2) {
-    struct timeval after;
-    gettimeofday(&after, NULL);
-    double millisecs = (after.tv_sec - before.tv_sec) * 1000.0
-        + (after.tv_usec - before.tv_usec) / 1000.0;
-    printf("7LUT loop num_luts: %" PRIgatenum " Time: %.1f ms\n", st->num_luts, millisecs);
-  }
-
-  /* Use the specified input bit to select between two Karnaugh maps. Call this function
+  /* 5. Use the specified input bit to select between two Karnaugh maps. Call this function
      recursively to generate those two maps. */
 
   /* Copy input bits already used to new array to avoid modifying the old one. */
-  int8_t next_inbits[64];
+  int8_t next_inbits[8];
   uint8_t bitp = 0;
   while (bitp < 6 && inbits[bitp] != -1) {
     next_inbits[bitp] = inbits[bitp];
     bitp += 1;
   }
-  assert(bitp < 6);
+  assert(bitp < 7);
   next_inbits[bitp] = -1;
   next_inbits[bitp + 1] = -1;
 
-  bool state_done[8];
-  lut_state new_states[8];
-  memset(new_states, 0, 8 * sizeof(lut_state));
-
-  bool thread_used = false;
+  state best;
+  best.num_gates = 0;
+  best.sat_metric = 0;
 
   /* Try all input bit orders. */
-  for (int8_t bit = 0; bit < 8; bit++) {
-    /* Check if the current bit number has already been used for selection. */
+  for (int bit = 0; bit < 8; bit++) {
     bool skip = false;
-    for (uint8_t i = 0; i < bitp; i++) {
+    for (int i = 0; i < bitp; i++) {
       if (inbits[i] == bit) {
         skip = true;
         break;
       }
     }
-    if (skip) {
-      state_done[bit] = true;
+    if (skip == true) {
       continue;
     }
-    state_done[bit] = false;
-    if (bit != 0) {
-      memcpy(next_inbits + 8 * bit, next_inbits, 8 * sizeof(int8_t));
-    }
-    new_states[bit] = *st;
-    next_inbits[8 * bit + bitp] = bit;
-    if (create_lut_circuit_parallel(state_done + bit, new_states + bit, target, mask,
-        next_inbits + 8 * bit, bit, andnot_available)) {
-      thread_used = true;
-    }
-  }
+    next_inbits[bitp] = bit;
 
-  bool alldone = false;
-  int wait = 1;
-  while (thread_used && !alldone) {
-    for (int i = 0; i < 8; i++) {
-      alldone = true;
-      if (!state_done[i]) {
-        alldone = false;
-        break;
+    const ttable fsel = st->gates[bit].table; /* Selection bit. */
+    state nst;
+    if (lut) {
+      nst = *st;
+      gatenum fb = create_circuit(&nst, target, mask & ~fsel, next_inbits, andnot, true, randomize);
+      if (fb == NO_GATE) {
+        continue;
+      }
+      gatenum fc = create_circuit(&nst, target, mask & fsel, next_inbits, andnot, true, randomize);
+      if (fc == NO_GATE) {
+        continue;
+      }
+
+      if (fb == bit || fc == bit) {
+        add_or_gate(&nst, fb, fc);
+      } else {
+        ttable mux_table = generate_lut_ttable(0xac, nst.gates[bit].table, nst.gates[fb].table,
+            nst.gates[fc].table);
+        add_lut(&nst, 0xac, mux_table, bit, fb, fc);
+      }
+    } else {
+      state nst_and = *st; /* New state using AND multiplexer. */
+      gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits, andnot,
+          false, randomize);
+      gatenum mux_out_and = NO_GATE;
+      if (fb != NO_GATE) {
+        gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
+            next_inbits, andnot, false, randomize);
+        gatenum andg = add_and_gate(&nst_and, fc, bit);
+        mux_out_and = add_xor_gate(&nst_and, fb, andg);
+      }
+
+      state nst_or = *st;
+      if (mux_out_and != NO_GATE) {
+        nst_or.max_gates = nst_and.num_gates;
+        nst_or.max_sat_metric = nst_and.sat_metric;
+      }
+      gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits, andnot, false,
+          randomize);
+      gatenum mux_out_or = NO_GATE;
+      if (fd != NO_GATE) {
+        gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
+            next_inbits, andnot, false, randomize);
+        gatenum org = add_or_gate(&nst_or, fe, bit);
+        mux_out_or = add_xor_gate(&nst_or, fd, org);
+        nst_or.max_gates = st->max_gates;
+        nst_or.max_sat_metric = st->max_sat_metric;
+      }
+      if (mux_out_and == NO_GATE && mux_out_or == NO_GATE) {
+        continue;
+      }
+
+      if (g_metric == GATES) {
+        if (mux_out_or == NO_GATE
+            || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
+          nst = nst_and;
+        } else {
+          nst = nst_or;
+        }
+      } else {
+        if (mux_out_or == NO_GATE
+            || (mux_out_and != NO_GATE && nst_and.sat_metric < nst_or.sat_metric)) {
+          nst = nst_and;
+        } else {
+          nst = nst_or;
+        }
       }
     }
-    if (!alldone) {
-      usleep(wait);
-      if (wait < 10) {
-        wait *= 2;
+
+    if (g_metric == GATES) {
+      if (best.num_gates == 0 || nst.num_gates < best.num_gates) {
+        best = nst;
+      }
+    } else {
+      if (best.sat_metric == 0 || nst.sat_metric < best.sat_metric) {
+        best = nst;
       }
     }
   }
 
-  lut_state best;
-  best.num_luts = 0;
-
-  for (int i = 0; i < 8; i++) {
-    if (new_states[i].num_luts == 0) {
-      continue;
-    }
-    if (best.num_luts == 0 || best.num_luts > new_states[i].num_luts) {
-      best = new_states[i];
-    }
-  }
-  if (best.num_luts == 0) {
+  if (best.num_gates == 0) {
     return NO_GATE;
   }
+
+  assert(ttable_equals_mask(target, best.gates[best.num_gates - 1].table, mask));
   *st = best;
-  if (g_verbosity > 1) {
-    printf("Level: %d Best: %d\n", bitp, best.num_luts - 1);
-  }
-  assert(ttable_equals_mask(target, st->luts[st->num_luts - 1].table, mask));
-  return st->num_luts - 1;
+  return best.num_gates - 1;
 }
 
 /* If sbox is true, a target truth table for the given bit of the sbox is generated.
@@ -1321,63 +1053,13 @@ static ttable generate_target(uint8_t bit, bool sbox) {
   return _mm256_loadu_si256((ttable*)vec);
 }
 
-/* Prints the given gate network to stdout in Graphviz dot format. */
+/* Prints a gate network to stdout in Graphviz dot format. */
 void print_digraph(const state st) {
   printf("digraph sbox {\n");
-    for (int gt = 0; gt < st.num_gates; gt++) {
-      char *gatename;
-      char buf[10];
-      switch (st.gates[gt].type) {
-        case IN:
-          gatename = buf;
-          sprintf(buf, "IN %d", gt);
-          break;
-        case NOT:
-          gatename = "NOT";
-          break;
-        case AND:
-          gatename = "AND";
-          break;
-        case OR:
-          gatename = "OR";
-          break;
-        case XOR:
-          gatename = "XOR";
-          break;
-        case ANDNOT:
-          gatename = "ANDNOT";
-          break;
-        case LUT:
-          printf("ERRLUT!\n");
-        default:
-          printf("%d\n", st.gates[gt].type);
-          assert(false);
-      }
-      printf("  gt%d [label=\"%s\"];\n", gt, gatename);
-    }
-    for (int gt = 0; gt < st.num_gates; gt++) {
-      if (st.gates[gt].in1 != NO_GATE) {
-        printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in1, gt);
-      }
-      if (st.gates[gt].in2 != NO_GATE) {
-        printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in2, gt);
-      }
-    }
-    for (uint8_t i = 0; i < 8; i++) {
-      if (st.outputs[i] != NO_GATE) {
-        printf("  gt%" PRIgatenum " -> out%" PRIu8 ";\n", st.outputs[i], i);
-      }
-    }
-  printf("}\n");
-}
-
-/* Prints the given LUT gate network to stdout in Graphviz dot format. */
-void print_lut_digraph(const lut_state st) {
-  printf("digraph sbox {\n");
-  assert(st.num_luts < MAX_GATES);
-  for (int gt = 0; gt < st.num_luts; gt++) {
+  assert(st.num_gates < MAX_GATES);
+  for (int gt = 0; gt < st.num_gates; gt++) {
     char gatename[10];
-    switch (st.luts[gt].type) {
+    switch (st.gates[gt].type) {
       case IN:
         sprintf(gatename, "IN %d", gt);
         break;
@@ -1397,22 +1079,22 @@ void print_lut_digraph(const lut_state st) {
         strcpy(gatename, "ANDNOT");
         break;
       case LUT:
-        sprintf(gatename, "0x%02x", st.luts[gt].function);
+        sprintf(gatename, "0x%02x", st.gates[gt].function);
         break;
       default:
         assert(0);
     }
     printf("  gt%d [label=\"%s\"];\n", gt, gatename);
   }
-  for (int gt = 8; gt < st.num_luts; gt++) {
-    if (st.luts[gt].in1 != NO_GATE) {
-      printf("  gt%" PRIgatenum " -> gt%d;\n", st.luts[gt].in1, gt);
+  for (int gt = 8; gt < st.num_gates; gt++) {
+    if (st.gates[gt].in1 != NO_GATE) {
+      printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in1, gt);
     }
-    if (st.luts[gt].in2 != NO_GATE) {
-      printf("  gt%" PRIgatenum " -> gt%d;\n", st.luts[gt].in2, gt);
+    if (st.gates[gt].in2 != NO_GATE) {
+      printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in2, gt);
     }
-    if (st.luts[gt].in3 != NO_GATE) {
-      printf("  gt%" PRIgatenum " -> gt%d;\n", st.luts[gt].in3, gt);
+    if (st.gates[gt].in3 != NO_GATE) {
+      printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in3, gt);
     }
   }
   for (uint8_t i = 0; i < 8; i++) {
@@ -1488,18 +1170,34 @@ static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
 /* Generates a simple fingerprint based on the Speck round function. It is meant to be used for
    creating unique-ish names for the state save file and is not intended to be cryptographically
    secure by any means. */
-static uint32_t do_fingerprint(void *st, size_t len) {
-  assert(st != NULL);
+static uint32_t state_fingerprint(const state st) {
+  assert(st.num_gates <= MAX_GATES);
+  state fpstate;
+  memset(&fpstate, 0, sizeof(state));
+  fpstate.max_gates = st.max_gates;
+  fpstate.num_gates = st.num_gates;
+  for (int i = 0; i < 8; i++) {
+    fpstate.outputs[i] = st.outputs[i];
+  }
+  for (int i = 0; i < st.num_gates; i++) {
+    fpstate.gates[i].table = st.gates[i].table;
+    fpstate.gates[i].type = st.gates[i].type;
+    fpstate.gates[i].in1 = st.gates[i].in1;
+    fpstate.gates[i].in2 = st.gates[i].in2;
+    fpstate.gates[i].in3 = st.gates[i].in3;
+    fpstate.gates[i].function = st.gates[i].function;
+  }
   uint16_t fp1 = 0;
   uint16_t fp2 = 0;
-  uint16_t *ptr = (uint16_t*)st;
+  uint16_t *ptr = (uint16_t*)&fpstate;
+  size_t len = sizeof(state) - sizeof(gate) * (MAX_GATES - fpstate.num_gates);
   for (int p = 0; p < len / 2; p++) {
     uint32_t ct = speck_round(fp1, fp2, ptr[p]);
     fp1 = ct >> 16;
     fp2 = ct & 0xffff;
   }
-  if (len % 2 != 0) {
-    uint32_t ct = speck_round(fp1, fp2, ((uint8_t*)st)[len - 1]);
+  if (len & 1) {
+    uint32_t ct = speck_round(fp1, fp2, ((uint8_t*)&fpstate)[len - 1]);
     fp1 = ct >> 16;
     fp2 = ct & 0xffff;
   }
@@ -1509,20 +1207,6 @@ static uint32_t do_fingerprint(void *st, size_t len) {
     fp2 = ct & 0xffff;
   }
   return (((uint32_t)fp1) << 16) | fp2;
-}
-
-static uint32_t state_fingerprint(state st) {
-  assert(st.num_gates <= MAX_GATES);
-  /* Zeroize unused memory in the struct. */
-  memset(st.gates + st.num_gates, 0, (MAX_GATES - st.num_gates) * sizeof(gate));
-  return do_fingerprint(&st, sizeof(state));
-}
-
-static uint32_t lut_state_fingerprint(lut_state st) {
-  assert(st.num_luts <= MAX_GATES);
-  /* Zeroize unused memory in the struct. */
-  memset(st.luts + st.num_luts, 0, (MAX_GATES - st.num_luts) * sizeof(lut));
-  return do_fingerprint(&st, sizeof(lut_state));
 }
 
 static void save_state(state st) {
@@ -1542,7 +1226,8 @@ static void save_state(state st) {
   }
 
   char name[40];
-  sprintf(name, "%d-%03d-%s-%08x.state", num_outputs, st.num_gates - 8, out, state_fingerprint(st));
+  sprintf(name, "%d-%03d-%03d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
+      state_fingerprint(st));
 
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
@@ -1552,261 +1237,205 @@ static void save_state(state st) {
   msgpack_packer pk;
   msgpack_packer_init(&pk, fp, msgpack_fbuffer_write);
   msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
-  msgpack_pack_int(&pk, MSGPACK_STATE);
   msgpack_pack_int(&pk, 8); /* Number of inputs. */
   msgpack_pack_array(&pk, 8); /* Number of outputs. */
   for (int i = 0; i < 8; i++) {
     msgpack_pack_int(&pk, st.outputs[i]);
   }
-  msgpack_pack_array(&pk, st.num_gates * 4);
+  msgpack_pack_array(&pk, st.num_gates * 6);
   for (int i = 0; i < st.num_gates; i++) {
     msgpack_pack_bin(&pk, 32);
     msgpack_pack_bin_body(&pk, &st.gates[i].table, 32);
     msgpack_pack_int(&pk, st.gates[i].type);
     msgpack_pack_int(&pk, st.gates[i].in1);
     msgpack_pack_int(&pk, st.gates[i].in2);
+    msgpack_pack_int(&pk, st.gates[i].in3);
+    msgpack_pack_int(&pk, st.gates[i].function);
   }
   fclose(fp);
 }
 
-static void save_lut_state(lut_state st) {
-  char out[9];
-  int num_outputs = 0;
-  memset(out, 0, 9);
-  for (int i = 0; i < st.num_luts; i++) {
-    for (uint8_t k = 0; k < 8; k++) {
-      if (st.outputs[k] == i) {
-        num_outputs += 1;
-        char str[2] = {'0' + k, '\0'};
-        strcat(out, str);
-        break;
-      }
-    }
+static int unpack_int(msgpack_unpacker *unp, int *ret) {
+  assert(ret != NULL);
+  if (unp == NULL) {
+    return false;
   }
-  char name[40];
-  sprintf(name, "%d-%03d-%s-%08x-lut.state", num_outputs, st.num_luts - 8, out,
-      lut_state_fingerprint(st));
-
-  FILE *fp = fopen(name, "w");
-  if (fp == NULL) {
-    fprintf(stderr, "Error opening file for writing.\n");
-    return;
+  msgpack_unpacked und;
+  msgpack_unpacked_init(&und);
+  if (msgpack_unpacker_next(unp, &und) != MSGPACK_UNPACK_SUCCESS
+      || (und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER
+          && und.data.type != MSGPACK_OBJECT_NEGATIVE_INTEGER)) {
+    msgpack_unpacked_destroy(&und);
+    return false;
   }
-  msgpack_packer pk;
-  msgpack_packer_init(&pk, fp, msgpack_fbuffer_write);
-  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
-  msgpack_pack_int(&pk, MSGPACK_LUT_STATE);
-  msgpack_pack_int(&pk, 8); /* Number of inputs. */
-  msgpack_pack_array(&pk, 8); /* Number of outputs. */
-  for (int i = 0; i < 8; i++) {
-    msgpack_pack_int(&pk, st.outputs[i]);
-  }
-  msgpack_pack_array(&pk, st.num_luts * 6);
-  for (int i = 0; i < st.num_luts; i++) {
-    msgpack_pack_bin(&pk, 32);
-    msgpack_pack_bin_body(&pk, &st.luts[i].table, 32);
-    msgpack_pack_int(&pk, st.luts[i].type);
-    msgpack_pack_int(&pk, st.luts[i].in1);
-    msgpack_pack_int(&pk, st.luts[i].in2);
-    msgpack_pack_int(&pk, st.luts[i].in3);
-    msgpack_pack_int(&pk, st.luts[i].function);
-  }
-  fclose(fp);
+  *ret = und.data.via.i64;
+  msgpack_unpacked_destroy(&und);
+  return true;
 }
 
-static int load_state(const char *name, state *return_state, lut_state *return_lut_state) {
+/* Loads a saved state */
+static bool load_state(const char *name, state *return_state) {
   assert(name != NULL);
   assert(return_state != NULL);
-  assert(return_lut_state != NULL);
   FILE *fp = fopen(name, "r");
   if (fp == NULL) {
     fprintf(stderr, "Error opening file: %s\n", name);
-    return -1;
+    return false;
   }
   fseek(fp, 0, SEEK_END);
   size_t fsize = ftell(fp);
   fseek(fp, 0, SEEK_SET);
   msgpack_unpacker unp;
   if (!msgpack_unpacker_init(&unp, fsize)) {
-    return -1;
+    return false;
   }
   if (fread(msgpack_unpacker_buffer(&unp), fsize, 1, fp) != 1) {
-    return -1;
+    return false;
   }
   fclose(fp);
   fp = NULL;
   msgpack_unpacker_buffer_consumed(&unp, fsize);
 
+  int format_version;
+  int num_inputs;
+  if (!unpack_int(&unp, &format_version)
+      || !unpack_int(&unp, &num_inputs)
+      || format_version != MSGPACK_FORMAT_VERSION
+      || num_inputs != 8) {
+    msgpack_unpacker_destroy(&unp);
+    return false;
+  }
+
   msgpack_unpacked und;
+
   msgpack_unpacked_init(&und);
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int format_version = und.data.via.i64;
-  msgpack_unpacked_destroy(&und);
-  if (format_version != MSGPACK_FORMAT_VERSION) {
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int state_type = und.data.via.i64;
-  msgpack_unpacked_destroy(&und);
-  if (state_type != MSGPACK_STATE && state_type != MSGPACK_LUT_STATE) {
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-  int num_inputs = und.data.via.i64;
-  msgpack_unpacked_destroy(&und);
-  if (num_inputs != 8) {
-    msgpack_unpacker_destroy(&unp);
-    return -1;
-  }
-
   if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
       || und.data.type != MSGPACK_OBJECT_ARRAY) {
     msgpack_unpacked_destroy(&und);
     msgpack_unpacker_destroy(&unp);
-    return -1;
+    return false;
   }
   int num_outputs = und.data.via.array.size;
   if (num_outputs != 8) {
+    msgpack_unpacked_destroy(&und);
     msgpack_unpacker_destroy(&unp);
-    return -1;
+    return false;
   }
+
   gatenum outputs[8];
   for (int i = 0; i < 8; i++) {
     if (und.data.via.array.ptr[i].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
       msgpack_unpacked_destroy(&und);
       msgpack_unpacker_destroy(&unp);
-      return -1;
+      return false;
     }
     outputs[i] = und.data.via.array.ptr[i].via.i64;
   }
   msgpack_unpacked_destroy(&und);
+  msgpack_unpacked_init(&und);
 
   if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
       || und.data.type != MSGPACK_OBJECT_ARRAY) {
     msgpack_unpacked_destroy(&und);
     msgpack_unpacker_destroy(&unp);
-    return -1;
+    return false;
   }
   int arraysize = und.data.via.array.size;
 
-  int divisor = state_type == MSGPACK_STATE ? 4 : 6;
-  if (arraysize % divisor != 0 || arraysize / divisor > MAX_GATES) {
+  if (arraysize % 6 != 0 || arraysize / 6 > MAX_GATES) {
     msgpack_unpacked_destroy(&und);
     msgpack_unpacker_destroy(&unp);
-    return -1;
+    return false;
   }
   for (int i = 0; i < 8; i++) {
-    if (outputs[i] >= arraysize / divisor && outputs[i] != NO_GATE) {
+    if (outputs[i] >= arraysize / 6 && outputs[i] != NO_GATE) {
       msgpack_unpacked_destroy(&und);
       msgpack_unpacker_destroy(&unp);
-      return -1;
+      return false;
     }
   }
 
-  if (state_type == MSGPACK_STATE) {
-    state st;
-    st.max_gates = MAX_GATES;
-    st.num_gates = arraysize / 4;
-    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
-    for (int i = 0; i < st.num_gates; i++) {
-      if (und.data.via.array.ptr[i * 4].type != MSGPACK_OBJECT_BIN
-          || und.data.via.array.ptr[i * 4].via.bin.size != 32
-          || und.data.via.array.ptr[i * 4 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 4 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 4 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
-      memcpy(&st.gates[i].table, und.data.via.array.ptr[i * 4].via.bin.ptr, 32);
-      st.gates[i].type = und.data.via.array.ptr[i * 4 + 1].via.i64;
-      st.gates[i].in1 = und.data.via.array.ptr[i * 4 + 2].via.i64;
-      st.gates[i].in2 = und.data.via.array.ptr[i * 4 + 3].via.i64;
-      if (st.gates[i].type > ANDNOT
-          || (st.gates[i].type == IN && i >= 8)
-          || (st.gates[i].in1 >= st.num_gates && st.gates[i].in1 != NO_GATE)
-          || (st.gates[i].in2 >= st.num_gates && st.gates[i].in2 != NO_GATE)
-          || (st.gates[i].in1 == NO_GATE && i >= 8)
-          || (st.gates[i].in2 == NO_GATE && i >= 8 && st.gates[i].type != NOT)) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
+  state st;
+  st.max_sat_metric = INT_MAX;
+  st.sat_metric = 0;
+  st.max_gates = MAX_GATES;
+  st.num_gates = arraysize / 6;
+  memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
+
+  for (int i = 0; i < st.num_gates; i++) {
+    if (und.data.via.array.ptr[i * 6].type != MSGPACK_OBJECT_BIN
+        || und.data.via.array.ptr[i * 6].via.bin.size != 32
+        || und.data.via.array.ptr[i * 6 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+        || und.data.via.array.ptr[i * 6 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+        || und.data.via.array.ptr[i * 6 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+        || und.data.via.array.ptr[i * 6 + 4].type != MSGPACK_OBJECT_POSITIVE_INTEGER
+        || und.data.via.array.ptr[i * 6 + 5].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
+      msgpack_unpacked_destroy(&und);
+      msgpack_unpacker_destroy(&unp);
+      return false;
     }
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    *return_state = st;
-    return MSGPACK_STATE;
-  } else if (state_type == MSGPACK_LUT_STATE) {
-    lut_state st;
-    st.max_luts = MAX_GATES;
-    st.num_luts = arraysize / 6;
-    memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
-    for (int i = 0; i < st.num_luts; i++) {
-      if (und.data.via.array.ptr[i * 6].type != MSGPACK_OBJECT_BIN
-          || und.data.via.array.ptr[i * 6].via.bin.size != 32
-          || und.data.via.array.ptr[i * 6 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 4].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          || und.data.via.array.ptr[i * 6 + 5].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
-      memcpy(&st.luts[i].table, und.data.via.array.ptr[i * 6].via.bin.ptr, 32);
-      st.luts[i].type = und.data.via.array.ptr[i * 6 + 1].via.i64;
-      st.luts[i].in1 = und.data.via.array.ptr[i * 6 + 2].via.i64;
-      st.luts[i].in2 = und.data.via.array.ptr[i * 6 + 3].via.i64;
-      st.luts[i].in3 = und.data.via.array.ptr[i * 6 + 4].via.i64;
-      st.luts[i].function = und.data.via.array.ptr[i * 6 + 5].via.i64;
-      if (st.luts[i].type > ANDNOT
-          || (st.luts[i].type == IN && i >= 8)
-          || (st.luts[i].in1 >= st.num_luts && st.luts[i].in1 != NO_GATE)
-          || (st.luts[i].in2 >= st.num_luts && st.luts[i].in2 != NO_GATE)
-          || (st.luts[i].in3 >= st.num_luts && st.luts[i].in2 != NO_GATE)
-          || (st.luts[i].in1 == NO_GATE && i >= 8)
-          || (st.luts[i].in2 == NO_GATE && i >= 8 && st.luts[i].type != NOT)
-          || (st.luts[i].in3 == NO_GATE && i >= 8 && st.luts[i].type == LUT)) {
-        msgpack_unpacked_destroy(&und);
-        msgpack_unpacker_destroy(&unp);
-        return -1;
-      }
+    memcpy(&st.gates[i].table, und.data.via.array.ptr[i * 6].via.bin.ptr, 32);
+    st.gates[i].type = und.data.via.array.ptr[i * 6 + 1].via.i64;
+    st.gates[i].in1 = und.data.via.array.ptr[i * 6 + 2].via.i64;
+    st.gates[i].in2 = und.data.via.array.ptr[i * 6 + 3].via.i64;
+    st.gates[i].in3 = und.data.via.array.ptr[i * 6 + 4].via.i64;
+    st.gates[i].function = und.data.via.array.ptr[i * 6 + 5].via.i64;
+    if (st.gates[i].type > LUT
+        || st.gates[i].type < IN
+        || (st.gates[i].type == IN && i >= 8)
+        || (st.gates[i].type == IN && st.gates[i].in1 != NO_GATE)
+        || (st.gates[i].type != IN && st.gates[i].in1 == NO_GATE)
+        || ((st.gates[i].type == IN || st.gates[i].type == NOT) && st.gates[i].in2 != NO_GATE)
+        || (st.gates[i].type != IN && st.gates[i].type != NOT && st.gates[i].in2 == NO_GATE)
+        || (st.gates[i].type != LUT && st.gates[i].in3 != NO_GATE)
+        || (st.gates[i].type == LUT && st.gates[i].in3 == NO_GATE)
+        || (st.gates[i].type != LUT && st.gates[i].function != 0)
+        || (st.gates[i].in1 != NO_GATE && st.gates[i].in1 >= st.num_gates)
+        || (st.gates[i].in2 != NO_GATE && st.gates[i].in2 >= st.num_gates)
+        || (st.gates[i].in3 != NO_GATE && st.gates[i].in3 >= st.num_gates)) {
+      msgpack_unpacked_destroy(&und);
+      msgpack_unpacker_destroy(&unp);
+      return false;
     }
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    *return_lut_state = st;
-    return MSGPACK_LUT_STATE;
   }
-  assert(0);
+
+  /* Calculate SAT metric. */
+  for (int i = 0; i < st.num_gates; i++) {
+    switch(st.gates[i].type) {
+      case IN:
+      case NOT:
+        break;
+      case AND:
+      case OR:
+      case ANDNOT:
+        st.sat_metric += 1;
+        break;
+      case XOR:
+        st.sat_metric += 4;
+        break;
+      case LUT:
+        st.sat_metric = 0;
+        goto no_metric;
+      default:
+        assert(0);
+    }
+  }
+  no_metric:
+
+  msgpack_unpacked_destroy(&und);
+  msgpack_unpacker_destroy(&unp);
+  *return_state = st;
+  return true;
 }
 
-/* Called by main to generate a graph of standard (NOT, AND, OR, XOR) gates. */
-void generate_gate_graph(bool andnot_available) {
+/* Called by main to generate a graph. */
+void generate_graph(const bool andnot, const bool lut, const bool randomize) {
   uint8_t num_start_states = 1;
   state start_states[8];
-  /* Generate the eight input bits. */
+  start_states[0].max_sat_metric = INT_MAX;
+  start_states[0].sat_metric = 0;
   start_states[0].max_gates = MAX_GATES;
+  /* Generate the eight input bits. */
   start_states[0].num_gates = 8;
   memset(start_states[0].gates, 0, sizeof(gate) * MAX_GATES);
   for (uint8_t i = 0; i < 8; i++) {
@@ -1814,6 +1443,8 @@ void generate_gate_graph(bool andnot_available) {
     start_states[0].gates[i].table = generate_target(i, false);
     start_states[0].gates[i].in1 = NO_GATE;
     start_states[0].gates[i].in2 = NO_GATE;
+    start_states[0].gates[i].in3 = NO_GATE;
+    start_states[0].gates[i].function = 0;
     start_states[0].outputs[i] = NO_GATE;
   }
 
@@ -1821,6 +1452,7 @@ void generate_gate_graph(bool andnot_available) {
      or network with the least amount of gates and add another. */
   while (1) {
     gatenum max_gates = MAX_GATES;
+    int max_sat_metric = INT_MAX;
     state out_states[8];
     uint8_t num_out_states = 0;
 
@@ -1840,6 +1472,7 @@ void generate_gate_graph(bool andnot_available) {
     printf("Generating circuits with %d output%s.\n", num_outputs + 1, num_outputs == 0 ? "" : "s");
     for (uint8_t current_state = 0; current_state < num_start_states; current_state++) {
       start_states[current_state].max_gates = max_gates;
+      start_states[current_state].max_sat_metric = max_sat_metric;
 
       /* Add all outputs not already present to see which resulting network is the smallest. */
       for (uint8_t output = 0; output < 8; output++) {
@@ -1850,9 +1483,14 @@ void generate_gate_graph(bool andnot_available) {
         printf("Generating circuit for output %d...\n", output);
         int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
         state st = start_states[current_state];
-        st.max_gates = max_gates;
-        const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-        st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot_available);
+        if (g_metric == GATES) {
+          st.max_gates = max_gates;
+        } else {
+          st.max_sat_metric = max_sat_metric;
+        }
+        const ttable mask = ~_mm256_setzero_si256();
+        st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot, lut,
+            randomize);
         if (st.outputs[output] == NO_GATE) {
           printf("No solution for output %d.\n", output);
           continue;
@@ -1860,17 +1498,32 @@ void generate_gate_graph(bool andnot_available) {
         assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
         save_state(st);
 
-        if (max_gates > st.num_gates) {
-          max_gates = st.num_gates;
-          num_out_states = 0;
-        }
-        if (st.num_gates <= max_gates) {
-          out_states[num_out_states++] = st;
+        if (g_metric == GATES) {
+          if (max_gates > st.num_gates) {
+            max_gates = st.num_gates;
+            num_out_states = 0;
+          }
+          if (st.num_gates <= max_gates) {
+            out_states[num_out_states++] = st;
+          }
+        } else {
+          if (max_sat_metric > st.sat_metric) {
+            max_sat_metric = st.sat_metric;
+            num_out_states = 0;
+          }
+          if (st.sat_metric <= max_sat_metric) {
+            out_states[num_out_states++] = st;
+          }
         }
       }
     }
-    printf("Found %d state%s with %d gates.\n", num_out_states,
-        num_out_states == 1 ? "" : "s", max_gates - 8);
+    if (g_metric == GATES) {
+      printf("Found %d state%s with %d gates.\n", num_out_states,
+          num_out_states == 1 ? "" : "s", max_gates - 8);
+    } else {
+      printf("Found %d state%s with SAT metric %d.\n", num_out_states,
+          num_out_states == 1 ? "" : "s", max_sat_metric);
+    }
     for (uint8_t i = 0; i < num_out_states; i++) {
       start_states[i] = out_states[i];
     }
@@ -1878,144 +1531,18 @@ void generate_gate_graph(bool andnot_available) {
   }
 }
 
-/* Called by main to generate a graph of 3-bit LUTs. */
-int generate_lut_graph(bool andnot_available) {
-  uint8_t num_start_states = 1;
-  lut_state start_states[8];
-
-  /* Generate the eight input bits. */
-  start_states[0].max_luts = MAX_GATES;
-  start_states[0].num_luts = 8;
-  memset(start_states[0].luts, 0, sizeof(lut) * MAX_GATES);
-  for (uint8_t i = 0; i < 8; i++) {
-    start_states[0].luts[i].type = IN;
-    start_states[0].luts[i].function = 0;
-    start_states[0].luts[i].table = generate_target(i, false);
-    start_states[0].luts[i].in1 = NO_GATE;
-    start_states[0].luts[i].in2 = NO_GATE;
-    start_states[0].luts[i].in3 = NO_GATE;
-    start_states[0].outputs[i] = NO_GATE;
-  }
-
-  /* Build the gate network one output at a time. After every added output, select the gate network
-     or network with the least amount of gates and add another. */
-  while (1) {
-    gatenum max_luts = MAX_GATES;
-    lut_state out_states[8];
-    uint8_t num_out_states = 0;
-
-    /* Count the outputs already present in the first of the start states. All start states will
-       have the same number of outputs. */
-    uint8_t num_outputs = 0;
-    for (uint8_t i = 0; i < 8; i++) {
-      if (start_states[0].outputs[i] != NO_GATE) {
-        num_outputs += 1;
-      }
-    }
-    if (num_outputs >= 8) {
-      /* If the input gate network has eight outputs, there is nothing more to do. */
-      printf("Done.\n");
-      break;
-    }
-    printf("Generating circuits with %d output%s.\n", num_outputs + 1, num_outputs == 0 ? "" : "s");
-    for (uint8_t current_state = 0; current_state < num_start_states; current_state++) {
-      start_states[current_state].max_luts = max_luts;
-
-      /* Add all outputs not already present to see which resulting network is the smallest. */
-      for (uint8_t output = 0; output < 8; output++) {
-        if (start_states[current_state].outputs[output] != NO_GATE) {
-          printf("Skipping output %d.\n", output);
-          continue;
-        }
-        printf("Generating circuit for output %d...\n", output);
-        int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-        lut_state st = start_states[current_state];
-        st.max_luts = max_luts;
-        const ttable mask = {(uint64_t)-1, (uint64_t)-1, (uint64_t)-1, (uint64_t)-1};
-        st.outputs[output] = create_lut_circuit(&st, g_target[output], mask, bits,
-            andnot_available);
-        if (st.outputs[output] == NO_GATE) {
-          printf("No solution for output %d.\n", output);
-          continue;
-        }
-        assert(ttable_equals(g_target[output], st.luts[st.outputs[output]].table));
-        save_lut_state(st);
-
-        if (max_luts > st.num_luts) {
-          max_luts = st.num_luts;
-          num_out_states = 0;
-        }
-        if (st.num_luts <= max_luts) {
-          out_states[num_out_states++] = st;
-        }
-      }
-    }
-    printf("Found %d state%s with %d LUTs.\n", num_out_states,
-        num_out_states == 1 ? "" : "s", max_luts - 8);
-    for (int i = 0; i < num_out_states; i++) {
-      start_states[i] = out_states[i];
-    }
-    num_start_states = num_out_states;
-  }
-
-  return 0;
-}
-
-void *worker_thread(void *arg) {
-  pthread_mutex_lock(&g_worker_mutex);
-  int threadno = g_running_threads++;
-  g_available_workers += 1;
-  while (!g_stop_workers) {
-    while (g_thread_work[threadno].done == NULL) {
-      pthread_cond_wait(&g_worker_cond, &g_worker_mutex);
-      if (g_stop_workers) {
-        pthread_mutex_unlock(&g_worker_mutex);
-        return NULL;
-      }
-    }
-    /* Declare a local thread_work variable and use memcpy to fill it with data from g_thread_work
-       to get around a bug in gcc. */
-    thread_work work;
-    memcpy(&work, g_thread_work + threadno, sizeof(thread_work));
-    if (g_verbosity > 0) {
-      printf("[%d] Starting work. Bit: %d\n", threadno, work.bit);
-    }
-    pthread_mutex_unlock(&g_worker_mutex);
-    if (work.lut) {
-      create_lut_circuit_split(work.state.lut, work.target, work.mask, work.inbits, work.bit,
-          work.andnot_available);
-    } else {
-      create_circuit_split(work.state.gate, work.target, work.mask, work.inbits, work.bit,
-          work.andnot_available);
-    }
-    if (g_verbosity > 0) {
-      printf("[%d] Done.\n", threadno);
-    }
-    pthread_mutex_lock(&g_worker_mutex);
-    *work.done = true;
-    g_available_workers += 1;
-    memset(g_thread_work + threadno, 0, sizeof(thread_work));
-  }
-  g_running_threads -= 1;
-  g_available_workers -= 1;
-  pthread_mutex_unlock(&g_worker_mutex);
-  return NULL;
-}
-
 int main(int argc, char **argv) {
-
-  /* Generate truth tables for all output bits of the target sbox. */
-  for (uint8_t i = 0; i < 8; i++) {
-    g_target[i] = generate_target(i, true);
-  }
 
   bool output_dot = false;
   bool output_c = false;
   bool lut_graph = false;
-  bool andnot_available = false;
+  bool andnot = false;
+  bool randomize = false;
   char *fname = NULL;
+  int oneoutput = -1;
+  int permute = 0;
   int c;
-  while ((c = getopt(argc, argv, "c:d:hlnv")) != -1) {
+  while ((c = getopt(argc, argv, "c:d:hlno:p:rsv")) != -1) {
     switch (c) {
       case 'c':
         output_c = true;
@@ -2027,18 +1554,43 @@ int main(int argc, char **argv) {
         break;
       case 'h':
         printf(
-            "-c file  Output C function.\n"
-            "-d file  Output DOT digraph.\n"
-            "-h       Display this help.\n"
-            "-l       Generate LUT graph.\n"
-            "-n       ANDNOT gates available.\n"
-            "-v       Verbose output.\n\n");
+            "-c file   Output C function.\n"
+            "-d file   Output DOT digraph.\n"
+            "-h        Display this help.\n"
+            "-l        Generate LUT graph.\n"
+            "-n        Use ANDNOT gates.\n"
+            "-o n      Generate one-output graphs for output n until stopped. Implies -r.\n"
+            "-p value  Permute sbox by XORing input with value.\n"
+            "-r        Enable randomization.\n"
+            "-s        Use SAT metric.\n"
+            "-v        Increase verbosity.\n\n");
         return 0;
       case 'l':
         lut_graph = true;
         break;
       case 'n':
-        andnot_available = true;
+        andnot = true;
+        break;
+      case 'o':
+        oneoutput = atoi(optarg);
+        if (oneoutput < 0 || oneoutput > 7) {
+          fprintf(stderr, "Bad output value: %s\n", optarg);
+          return 1;
+        }
+        randomize = true;
+        break;
+      case 'p':
+        permute = atoi(optarg);
+        if (permute < 0 || permute > 255) {
+          fprintf(stderr, "Bad permutation value: %s\n", optarg);
+          return 1;
+        }
+        break;
+      case 'r':
+        randomize = true;
+        break;
+      case 's':
+        g_metric = SAT;
         break;
       case 'v':
         g_verbosity += 1;
@@ -2053,72 +1605,91 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  state return_state;
-  lut_state return_lut_state;
-  int loaded_state_type = -1;
+  if (lut_graph && g_metric == SAT) {
+    fprintf(stderr, "SAT metric can not be combined with LUT graph generation.\n");
+    return 1;
+  }
+
   if (output_c || output_dot) {
-    loaded_state_type = load_state(fname, &return_state, &return_lut_state);
-    if (loaded_state_type != MSGPACK_STATE && loaded_state_type != MSGPACK_LUT_STATE) {
+    state st;
+    if (!load_state(fname, &st)) {
       fprintf(stderr, "Error when reading state file.\n");
       return 1;
     }
-  }
-
-  if (output_c) {
-    if (loaded_state_type == MSGPACK_LUT_STATE) {
-      fprintf(stderr, "Outputting LUT graph as C function not supported.\n");
-      return 1;
-    } else if (loaded_state_type == MSGPACK_STATE) {
-      print_c_function(return_state);
-      return 0;
-    }
-    assert(0);
-  }
-
-  if (output_dot) {
-    if (loaded_state_type == MSGPACK_LUT_STATE) {
-      print_lut_digraph(return_lut_state);
-    } else if (loaded_state_type == MSGPACK_STATE) {
-      print_digraph(return_state);
+    if (output_c) {
+      for (int i = 0; i < st.num_gates; i++) {
+        if (st.gates[i].type == LUT) {
+          fprintf(stderr, "C output of graphs containing LUTs is not supported.\n");
+          return 1;
+        }
+      }
+      print_c_function(st);
     } else {
-      assert(0);
+      print_digraph(st);
     }
     return 0;
   }
 
-  int numproc = sysconf(_SC_NPROCESSORS_ONLN) - 1;
-  pthread_mutex_init(&g_worker_mutex, NULL);
-  pthread_cond_init(&g_worker_cond, NULL);
-  g_thread_work = (thread_work*)calloc(numproc, sizeof(thread_work));
-  assert(g_thread_work != NULL);
-  pthread_t thread[numproc];
-  pthread_attr_t attr;
-  pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 0x800000);
-  for (int i = 0; i < numproc; i++) {
-    pthread_create(thread + i, &attr, worker_thread, NULL);
-  }
-  pthread_attr_destroy(&attr);
-
-  if (lut_graph) {
-    printf("Generating LUT graph.\n");
-    return generate_lut_graph(andnot_available);
+  if (permute == 0) {
+    memcpy(g_sbox_enc, g_lattice_sbox, 256 * sizeof(uint8_t));
   } else {
-    printf("Generating standard gate graph.\n");
-    generate_gate_graph(andnot_available);
+    for (int i = 0; i < 256; i++) {
+      g_sbox_enc[i] = g_lattice_sbox[i ^ (uint8_t)permute];
+    }
   }
 
-  g_stop_workers = true;
-  pthread_cond_broadcast(&g_worker_cond);
-
-  for (int i = 0; i < numproc; i++) {
-    void *ptr;
-    pthread_join(thread[i], &ptr);
+  /* Generate truth tables for all output bits of the target sbox. */
+  for (uint8_t i = 0; i < 8; i++) {
+    g_target[i] = generate_target(i, true);
   }
 
-  free(g_thread_work);
-  pthread_cond_destroy(&g_worker_cond);
-  pthread_mutex_destroy(&g_worker_mutex);
+  if (oneoutput != -1) {
+    state st;
+    st.max_sat_metric = INT_MAX;
+    st.sat_metric = 0;
+    st.max_gates = MAX_GATES;
+    st.num_gates = 8;
+    memset(st.gates, 0, sizeof(gate) * MAX_GATES);
+    for (uint8_t i = 0; i < 8; i++) {
+      st.gates[i].type = IN;
+      st.gates[i].table = generate_target(i, false);
+      st.gates[i].in1 = NO_GATE;
+      st.gates[i].in2 = NO_GATE;
+      st.gates[i].in3 = NO_GATE;
+      st.gates[i].function = 0;
+      st.outputs[i] = NO_GATE;
+    }
+    int num = 0;
+    while (1) {
+      state nst = st;
+
+      int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+      const ttable mask = ~_mm256_setzero_si256();
+      nst.outputs[oneoutput] = create_circuit(&nst, g_target[oneoutput], mask, bits, andnot,
+          lut_graph, randomize);
+      if (nst.outputs[oneoutput] == NO_GATE) {
+        printf("%d: Not found.\n", num++);
+        continue;
+      }
+      printf("%d: %d gates. SAT metric: %d\n", num++, nst.num_gates - 8, nst.sat_metric);
+      save_state(nst);
+      if (g_metric == GATES) {
+        if (nst.num_gates < st.max_gates) {
+          st.max_gates = nst.num_gates;
+        }
+      } else {
+        if (nst.sat_metric < st.max_sat_metric) {
+          st.max_sat_metric = nst.sat_metric;
+        }
+      }
+    }
+  } else {
+    generate_graph(andnot, lut_graph, randomize);
+  }
+
+  if (g_rand_fp != NULL) {
+    fclose(g_rand_fp);
+  }
 
   return 0;
 }
