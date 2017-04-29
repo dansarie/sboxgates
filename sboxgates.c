@@ -16,6 +16,13 @@
 #include <unistd.h>
 #include <x86intrin.h>
 
+#ifdef USE_MPI
+#include <mpi.h>
+#define MPI_FINALIZE() MPI_Finalize()
+#else
+#define MPI_FINALIZE()
+#endif
+
 #define MSGPACK_FORMAT_VERSION 2
 #define MAX_GATES 500
 #define NO_GATE ((gatenum)-1)
@@ -67,6 +74,7 @@ uint8_t g_sbox_enc[256];
 
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 metric g_metric = GATES;  /* Metric that should be used when selecting between two solutions. */
+uint64_t g_rand[16];
 FILE *g_rand_fp = NULL;   /* Pointer to /dev/urandom. */
 
 /* Prints a truth table to the console. Used for debugging. */
@@ -483,15 +491,16 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   }
 
   if (randomize) {
-    assert(g_rand_fp != NULL);
-    const int nrand = st->num_gates - 1;
-    uint16_t rand[nrand];
-    if (fread(&rand, sizeof(uint16_t), nrand, g_rand_fp) != nrand) {
-      fprintf(stderr, "Error when reading from /dev/urandom.\n");
-    }
+    int p = 0;
     /* Fisher-Yates shuffle. */
     for (uint32_t i = st->num_gates - 1; i > 0; i--) {
-      uint16_t j = rand[i - 1] % (i + 1);
+      /* xorshift1024* */
+      uint64_t r0 = g_rand[p];
+      p = (p + 1) & 15;
+      uint64_t r1 = g_rand[p];
+      r1 ^= r1 << 31;
+      g_rand[p] = r1 ^ r0 ^ (r1 >> 11) ^ (r0 >> 30);
+      uint64_t j = (g_rand[p] * 1181783497276652981U) % (i + 1);
       gatenum t = gate_order[i];
       gate_order[i] = gate_order[j];
       gate_order[j] = t;
@@ -1586,6 +1595,10 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
 
 int main(int argc, char **argv) {
 
+  #ifdef USE_MPI
+  MPI_Init(&argc, &argv);
+  #endif
+
   bool output_dot = false;
   bool output_c = false;
   bool lut_graph = false;
@@ -1618,6 +1631,7 @@ int main(int argc, char **argv) {
             "-p value  Permute sbox by XORing input with value.\n"
             "-r        Enable randomization.\n"
             "-s        Use SAT metric.\n");
+        MPI_FINALIZE();
         return 0;
       case 'i':
         iterations = atoi(optarg);
@@ -1635,6 +1649,7 @@ int main(int argc, char **argv) {
         oneoutput = atoi(optarg);
         if (oneoutput < 0 || oneoutput > 7) {
           fprintf(stderr, "Bad output value: %s\n", optarg);
+          MPI_FINALIZE();
           return 1;
         }
         break;
@@ -1642,6 +1657,7 @@ int main(int argc, char **argv) {
         permute = atoi(optarg);
         if (permute < 0 || permute > 255) {
           fprintf(stderr, "Bad permutation value: %s\n", optarg);
+          MPI_FINALIZE();
           return 1;
         }
         break;
@@ -1652,17 +1668,20 @@ int main(int argc, char **argv) {
         g_metric = SAT;
         break;
       default:
+        MPI_FINALIZE();
         return 1;
     }
   }
 
   if (output_c && output_dot) {
     fprintf(stderr, "Cannot combine c and d options.\n");
+    MPI_FINALIZE();
     return 1;
   }
 
   if (lut_graph && g_metric == SAT) {
     fprintf(stderr, "SAT metric can not be combined with LUT graph generation.\n");
+    MPI_FINALIZE();
     return 1;
   }
 
@@ -1670,12 +1689,14 @@ int main(int argc, char **argv) {
     state st;
     if (!load_state(fname, &st)) {
       fprintf(stderr, "Error when reading state file.\n");
+      MPI_FINALIZE();
       return 1;
     }
     if (output_c) {
       for (int i = 0; i < st.num_gates; i++) {
         if (st.gates[i].type == LUT) {
           fprintf(stderr, "C output of graphs containing LUTs is not supported.\n");
+          MPI_FINALIZE();
           return 1;
         }
       }
@@ -1683,6 +1704,7 @@ int main(int argc, char **argv) {
     } else {
       print_digraph(st);
     }
+    MPI_FINALIZE();
     return 0;
   }
 
@@ -1702,6 +1724,12 @@ int main(int argc, char **argv) {
   g_rand_fp = fopen("/dev/urandom", "r");
   if (g_rand_fp == NULL) {
     fprintf(stderr, "Error opening /dev/urandom.\n");
+    MPI_FINALIZE();
+    return 1;
+  }
+  if (fread(&g_rand, 16 * sizeof(uint64_t), 1, g_rand_fp) != 1) {
+    fprintf(stderr, "Error reading from /dev/urandom.\n");
+    MPI_FINALIZE();
     return 1;
   }
 
@@ -1714,5 +1742,6 @@ int main(int argc, char **argv) {
   assert(g_rand_fp != NULL);
   fclose(g_rand_fp);
 
+  MPI_FINALIZE();
   return 0;
 }
