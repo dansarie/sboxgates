@@ -74,8 +74,6 @@ uint8_t g_sbox_enc[256];
 
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 metric g_metric = GATES;  /* Metric that should be used when selecting between two solutions. */
-uint64_t g_rand[16];
-FILE *g_rand_fp = NULL;   /* Pointer to /dev/urandom. */
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -334,8 +332,32 @@ static inline void generate_lut_ttables(const ttable in1, const ttable in2, cons
   }
 }
 
+static inline uint64_t xorshift1024() {
+  static bool init = false;
+  static uint64_t rand[16];
+  static int p = 0;
+  if (!init) {
+    FILE *rand_fp = fopen("/dev/urandom", "r");
+    if (rand_fp == NULL) {
+      fprintf(stderr, "Error opening /dev/urandom.\n");
+    } else if (fread(rand, 16 * sizeof(uint64_t), 1, rand_fp) != 1) {
+      fprintf(stderr, "Error reading from /dev/urandom.\n");
+      fclose(rand_fp);
+    } else {
+      init = true;
+      fclose(rand_fp);
+    }
+  }
+  uint64_t r0 = rand[p];
+  p = (p + 1) & 15;
+  uint64_t r1 = rand[p];
+  r1 ^= r1 << 31;
+  rand[p] = r1 ^ r0 ^ (r1 >> 11) ^ (r0 >> 30);
+  return rand[p] * 1181783497276652981U;
+}
+
 static inline bool get_lut_function(const ttable in1, const ttable in2, const ttable in3,
-    const ttable target, const ttable mask, uint8_t *func) {
+    const ttable target, const ttable mask, const bool randomize, uint8_t *func) {
   *func = 0;
   uint8_t tableset = 0;
 
@@ -371,13 +393,8 @@ static inline bool get_lut_function(const ttable in1, const ttable in2, const tt
   }
 
   /* Randomize don't-cares in table. */
-  if (tableset != 0xff) {
-    assert(g_rand_fp != NULL);
-    uint8_t rand;
-    if (fread(&rand, sizeof(uint8_t), 1, g_rand_fp) != 1) {
-      fprintf(stderr, "Error when reading from /dev/urandom.\n");
-    }
-    *func |= ~tableset & rand;
+  if (randomize && tableset != 0xff) {
+    *func |= ~tableset & (uint8_t)xorshift1024();
   }
 
   return true;
@@ -491,16 +508,9 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   }
 
   if (randomize) {
-    int p = 0;
     /* Fisher-Yates shuffle. */
     for (uint32_t i = st->num_gates - 1; i > 0; i--) {
-      /* xorshift1024* */
-      uint64_t r0 = g_rand[p];
-      p = (p + 1) & 15;
-      uint64_t r1 = g_rand[p];
-      r1 ^= r1 << 31;
-      g_rand[p] = r1 ^ r0 ^ (r1 >> 11) ^ (r0 >> 30);
-      uint64_t j = (g_rand[p] * 1181783497276652981U) % (i + 1);
+      uint64_t j = xorshift1024() % (i + 1);
       gatenum t = gate_order[i];
       gate_order[i] = gate_order[j];
       gate_order[j] = t;
@@ -572,7 +582,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
             continue;
           }
           uint8_t func;
-          if (!get_lut_function(ta, tb, tc, target, mask, &func)) {
+          if (!get_lut_function(ta, tb, tc, target, mask, randomize, &func)) {
             continue;
           }
           ttable nt = generate_lut_ttable(func, ta, tb, tc);
@@ -614,7 +624,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
               for (int func_outer = 0; func_outer < 256; func_outer++) {
                 ttable t_outer = cache[func_outer];
                 uint8_t func_inner;
-                if (!get_lut_function(t_outer, td, te, target, mask, &func_inner)) {
+                if (!get_lut_function(t_outer, td, te, target, mask, randomize, &func_inner)) {
                   continue;
                 }
                 ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
@@ -674,7 +684,8 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
                     for (int func_middle = 0; func_middle < 256; func_middle++) {
                       ttable t_middle = middle_cache[func_middle];
                       uint8_t func_inner;
-                      if (!get_lut_function(t_outer, t_middle, tg, target, mask, &func_inner)) {
+                      if (!get_lut_function(t_outer, t_middle, tg, target, mask, randomize,
+                          &func_inner)) {
                         continue;
                       }
                       ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
@@ -1584,29 +1595,59 @@ int main(int argc, char **argv) {
 
   #ifdef USE_MPI
   MPI_Init(&argc, &argv);
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
   #endif
 
   bool output_dot = false;
   bool output_c = false;
   bool lut_graph = false;
   bool andnot = false;
+  #ifdef USE_MPI
+  bool randomize = true;
+  #else
   bool randomize = false;
+  #endif
   char *fname = NULL;
   int oneoutput = -1;
   int permute = 0;
   int iterations = 1;
   int c;
-  while ((c = getopt(argc, argv, "c:d:hi:lno:p:rs")) != -1) {
+  #ifdef USE_MPI
+  char *opts = "c:d:hi:lno:p:s";
+  #else
+  char *opts = "c:d:hi:lno:p:rs";
+  #endif
+  while ((c = getopt(argc, argv, opts)) != -1) {
     switch (c) {
       case 'c':
+        #ifdef USE_MPI
+        if (rank != 0) {
+          MPI_Finalize();
+          return 0;
+        }
+        #endif
         output_c = true;
         fname = optarg;
         break;
       case 'd':
+        #ifdef USE_MPI
+        if (rank != 0) {
+          MPI_Finalize();
+          return 0;
+        }
+        #endif
         output_dot = true;
         fname = optarg;
         break;
       case 'h':
+        #ifdef USE_MPI
+        if (rank != 0) {
+          MPI_Finalize();
+          return 0;
+        }
+        #endif
         printf(
             "-c file   Output C function.\n"
             "-d file   Output DOT digraph.\n"
@@ -1616,7 +1657,9 @@ int main(int argc, char **argv) {
             "-n        Use ANDNOT gates.\n"
             "-o n      Generate one-output graph for output n.\n"
             "-p value  Permute sbox by XORing input with value.\n"
+            #ifndef USE_MPI
             "-r        Enable randomization.\n"
+            #endif
             "-s        Use SAT metric.\n");
         MPI_FINALIZE();
         return 0;
@@ -1648,9 +1691,11 @@ int main(int argc, char **argv) {
           return 1;
         }
         break;
+      #ifndef USE_MPI
       case 'r':
         randomize = true;
         break;
+      #endif
       case 's':
         g_metric = SAT;
         break;
@@ -1708,26 +1753,11 @@ int main(int argc, char **argv) {
     g_target[i] = generate_target(i, true);
   }
 
-  g_rand_fp = fopen("/dev/urandom", "r");
-  if (g_rand_fp == NULL) {
-    fprintf(stderr, "Error opening /dev/urandom.\n");
-    MPI_FINALIZE();
-    return 1;
-  }
-  if (fread(&g_rand, 16 * sizeof(uint64_t), 1, g_rand_fp) != 1) {
-    fprintf(stderr, "Error reading from /dev/urandom.\n");
-    MPI_FINALIZE();
-    return 1;
-  }
-
   if (oneoutput != -1) {
     generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput);
   } else {
     generate_graph(andnot, lut_graph, randomize, iterations);
   }
-
-  assert(g_rand_fp != NULL);
-  fclose(g_rand_fp);
 
   MPI_FINALIZE();
   return 0;
