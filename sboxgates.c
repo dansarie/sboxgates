@@ -1476,14 +1476,12 @@ void generate_graph_one_output(const bool andnot, const bool lut, const bool ran
 /* Called by main to generate a graph. */
 void generate_graph(const bool andnot, const bool lut, const bool randomize, const int iterations) {
   int num_start_states = 1;
-  state *start_states = malloc(sizeof(state));
-  assert(start_states != NULL);
+  state start_states[20];
   start_states[0].max_sat_metric = INT_MAX;
   start_states[0].sat_metric = 0;
   start_states[0].max_gates = MAX_GATES;
   /* Generate the eight input bits. */
   start_states[0].num_gates = 8;
-  memset(start_states[0].gates, 0, sizeof(gate) * MAX_GATES);
   for (uint8_t i = 0; i < 8; i++) {
     start_states[0].gates[i].type = IN;
     start_states[0].gates[i].table = generate_target(i, false);
@@ -1499,10 +1497,8 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
   while (1) {
     gatenum max_gates = MAX_GATES;
     int max_sat_metric = INT_MAX;
-    state *out_states = malloc(4 * sizeof(state));
-    assert(out_states != NULL);
+    state out_states[20];
     int num_out_states = 0;
-    int out_states_alloc = 4;
 
     /* Count the outputs already present in the first of the start states. All start states will
        have the same number of outputs. */
@@ -1515,8 +1511,6 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
     if (num_outputs >= 8) {
       /* If the input gate network has eight outputs, there is nothing more to do. */
       printf("Done.\n");
-      free(out_states);
-      free(start_states);
       break;
     }
     for (int iter = 0; iter < iterations; iter++) {
@@ -1556,11 +1550,7 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
               num_out_states = 0;
             }
             if (st.num_gates <= max_gates) {
-              if (num_out_states == out_states_alloc) {
-                out_states_alloc *= 2;
-                out_states = realloc(out_states, out_states_alloc * sizeof(state));
-                assert(out_states != NULL);
-              }
+              assert(num_out_states < 20); /* Very unlikely, but not impossible. */
               out_states[num_out_states++] = st;
             }
           } else {
@@ -1569,11 +1559,7 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
               num_out_states = 0;
             }
             if (st.sat_metric <= max_sat_metric) {
-              if (num_out_states == out_states_alloc) {
-                out_states_alloc *= 2;
-                out_states = realloc(out_states, out_states_alloc * sizeof(state));
-                assert(out_states != NULL);
-              }
+              assert(num_out_states < 20); /* Very unlikely, but not impossible. */
               out_states[num_out_states++] = st;
             }
           }
@@ -1587,8 +1573,9 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
       printf("Found %d state%s with SAT metric %d.\n", num_out_states,
           num_out_states == 1 ? "" : "s", max_sat_metric);
     }
-    free(start_states);
-    start_states = out_states;
+    for (int i  = 0; i < num_out_states; i++) {
+      start_states[i] = out_states[i];
+    }
     num_start_states = num_out_states;
   }
 }
