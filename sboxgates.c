@@ -67,7 +67,6 @@ const uint8_t g_lattice_sbox[] = {
 uint8_t g_sbox_enc[256];
 
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
-uint8_t g_verbosity = 0;  /* Verbosity level. Higher = more debugging messages. */
 metric g_metric = GATES;  /* Metric that should be used when selecting between two solutions. */
 FILE *g_rand_fp = NULL;   /* Pointer to /dev/urandom. */
 
@@ -609,9 +608,6 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
                 }
                 ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
                 assert(ttable_equals_mask(target, t_inner, mask));
-                if (g_verbosity > 2) {
-                  printf("Found 5LUT!\n");
-                }
                 return add_lut(st, func_inner, t_inner,
                     add_lut(st, func_outer, t_outer, gi, gk, gm), go, gq);
               }
@@ -672,9 +668,6 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
                       }
                       ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
                       assert(ttable_equals_mask(target, t_inner, mask));
-                      if (g_verbosity > 2) {
-                        printf("Found 7LUT!\n");
-                      }
                       return add_lut(st, func_inner, t_inner,
                           add_lut(st, func_outer, t_outer, gi, gk, gm),
                           add_lut(st, func_middle, t_middle, go, gq, gs), gu);
@@ -1601,7 +1594,7 @@ int main(int argc, char **argv) {
   int permute = 0;
   int iterations = 1;
   int c;
-  while ((c = getopt(argc, argv, "c:d:hi:lno:p:rsv")) != -1) {
+  while ((c = getopt(argc, argv, "c:d:hi:lno:p:rs")) != -1) {
     switch (c) {
       case 'c':
         output_c = true;
@@ -1622,8 +1615,7 @@ int main(int argc, char **argv) {
             "-o n      Generate one-output graph for output n.\n"
             "-p value  Permute sbox by XORing input with value.\n"
             "-r        Enable randomization.\n"
-            "-s        Use SAT metric.\n"
-            "-v        Increase verbosity.\n\n");
+            "-s        Use SAT metric.\n");
         return 0;
       case 'i':
         iterations = atoi(optarg);
@@ -1656,9 +1648,6 @@ int main(int argc, char **argv) {
         break;
       case 's':
         g_metric = SAT;
-        break;
-      case 'v':
-        g_verbosity += 1;
         break;
       default:
         return 1;
@@ -1720,7 +1709,7 @@ int main(int argc, char **argv) {
     generate_graph(andnot, lut_graph, randomize, iterations);
   }
 
-  assert(g_rand_fp != NULL):
+  assert(g_rand_fp != NULL);
   fclose(g_rand_fp);
 
   return 0;
