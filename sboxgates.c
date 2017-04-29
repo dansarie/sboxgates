@@ -1440,24 +1440,10 @@ static bool load_state(const char *name, state *return_state) {
 }
 
 void generate_graph_one_output(const bool andnot, const bool lut, const bool randomize,
-    const int iterations, const int output) {
+    const int iterations, const int output, state st) {
   assert(iterations > 0);
   assert(output >= 0 && output <= 7);
-  state st;
-  st.max_sat_metric = INT_MAX;
-  st.sat_metric = 0;
-  st.max_gates = MAX_GATES;
-  st.num_gates = 8;
-  memset(st.gates, 0, sizeof(gate) * MAX_GATES);
-  for (uint8_t i = 0; i < 8; i++) {
-    st.gates[i].type = IN;
-    st.gates[i].table = generate_target(i, false);
-    st.gates[i].in1 = NO_GATE;
-    st.gates[i].in2 = NO_GATE;
-    st.gates[i].in3 = NO_GATE;
-    st.gates[i].function = 0;
-    st.outputs[i] = NO_GATE;
-  }
+  printf("Generating graphs for output %d...\n", output);
   for (int iter = 0; iter < iterations; iter++) {
     state nst = st;
 
@@ -1485,23 +1471,11 @@ void generate_graph_one_output(const bool andnot, const bool lut, const bool ran
 }
 
 /* Called by main to generate a graph. */
-void generate_graph(const bool andnot, const bool lut, const bool randomize, const int iterations) {
+void generate_graph(const bool andnot, const bool lut, const bool randomize, const int iterations,
+    const state st) {
   int num_start_states = 1;
   state start_states[20];
-  start_states[0].max_sat_metric = INT_MAX;
-  start_states[0].sat_metric = 0;
-  start_states[0].max_gates = MAX_GATES;
-  /* Generate the eight input bits. */
-  start_states[0].num_gates = 8;
-  for (uint8_t i = 0; i < 8; i++) {
-    start_states[0].gates[i].type = IN;
-    start_states[0].gates[i].table = generate_target(i, false);
-    start_states[0].gates[i].in1 = NO_GATE;
-    start_states[0].gates[i].in2 = NO_GATE;
-    start_states[0].gates[i].in3 = NO_GATE;
-    start_states[0].gates[i].function = 0;
-    start_states[0].outputs[i] = NO_GATE;
-  }
+  start_states[0] = st;
 
   /* Build the gate network one output at a time. After every added output, select the gate network
      or network with the least amount of gates and add another. */
@@ -1609,16 +1583,21 @@ int main(int argc, char **argv) {
   #else
   bool randomize = false;
   #endif
-  char *fname = NULL;
+  char fname[1000];
+  char gfname[1000];
   int oneoutput = -1;
   int permute = 0;
   int iterations = 1;
   int c;
   #ifdef USE_MPI
-  char *opts = "c:d:hi:lno:p:s";
+  char *opts = "c:d:g:hi:lno:p:s";
   #else
-  char *opts = "c:d:hi:lno:p:rs";
+  char *opts = "c:d:g:hi:lno:p:rs";
   #endif
+
+  strcpy(fname, "");
+  strcpy(gfname, "");
+
   while ((c = getopt(argc, argv, opts)) != -1) {
     switch (c) {
       case 'c':
@@ -1629,7 +1608,12 @@ int main(int argc, char **argv) {
         }
         #endif
         output_c = true;
-        fname = optarg;
+        if (strlen(optarg) >= 1000) {
+          fprintf(stderr, "Error: File name too long.\n");
+          MPI_FINALIZE();
+          return 1;
+        }
+        strcpy(fname, optarg);
         break;
       case 'd':
         #ifdef USE_MPI
@@ -1639,7 +1623,20 @@ int main(int argc, char **argv) {
         }
         #endif
         output_dot = true;
-        fname = optarg;
+        if (strlen(optarg) >= 1000) {
+          fprintf(stderr, "Error: File name too long.\n");
+          MPI_FINALIZE();
+          return 1;
+        }
+        strcpy(fname, optarg);
+        break;
+      case 'g':
+        if (strlen(optarg) >= 1000) {
+          fprintf(stderr, "Error: File name too long.\n");
+          MPI_FINALIZE();
+          return 1;
+        }
+        strcpy(gfname, optarg);
         break;
       case 'h':
         #ifdef USE_MPI
@@ -1651,6 +1648,7 @@ int main(int argc, char **argv) {
         printf(
             "-c file   Output C function.\n"
             "-d file   Output DOT digraph.\n"
+            "-g file   Load graph from file as initial state. (For use with -o.)\n"
             "-h        Display this help.\n"
             "-i n      Do n iterations per step.\n"
             "-l        Generate LUT graph.\n"
@@ -1753,10 +1751,32 @@ int main(int argc, char **argv) {
     g_target[i] = generate_target(i, true);
   }
 
-  if (oneoutput != -1) {
-    generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput);
+  state st;
+  if (strlen(gfname) == 0) {
+    st.max_sat_metric = INT_MAX;
+    st.sat_metric = 0;
+    st.max_gates = MAX_GATES;
+    st.num_gates = 8;
+    for (uint8_t i = 0; i < 8; i++) {
+      st.gates[i].type = IN;
+      st.gates[i].table = generate_target(i, false);
+      st.gates[i].in1 = NO_GATE;
+      st.gates[i].in2 = NO_GATE;
+      st.gates[i].in3 = NO_GATE;
+      st.gates[i].function = 0;
+      st.outputs[i] = NO_GATE;
+    }
+  } else if (!load_state(gfname, &st)) {
+    MPI_FINALIZE();
+    return 1;
   } else {
-    generate_graph(andnot, lut_graph, randomize, iterations);
+    printf("Loaded %s.\n", gfname);
+  }
+
+  if (oneoutput != -1) {
+      generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput, st);
+  } else {
+    generate_graph(andnot, lut_graph, randomize, iterations, st);
   }
 
   MPI_FINALIZE();
