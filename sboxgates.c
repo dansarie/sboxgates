@@ -481,22 +481,24 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     if (g_rand_fp == NULL) {
       fprintf(stderr, "Error when opening /dev/urandom.\n");
     } else {
-      /* Fisher-Yates shuffle */
-      uint32_t rand = 17;
-      do {
-        if (fread(&rand, sizeof(uint32_t), 1, g_rand_fp) != 1) {
-          fprintf(stderr, "Error when reading from /dev/urandom.\n");
-        }
-      } while (rand == 0);
+      /* Fisher-Yates shuffle. With a 1024 bit PRNG state, we can theoretically get every
+         permutation of lists with less than or equal to 170 elements. */
+      uint64_t rand[16];
+      if (fread(&rand, 16 * sizeof(uint64_t), 1, g_rand_fp) != 1) {
+        fprintf(stderr, "Error when reading from /dev/urandom.\n");
+      }
+      int p = 0;
       for (uint32_t i = st->num_gates - 1; i > 0; i--) {
-        uint32_t j = rand % (i + 1);
+        /* xorshift1024* */
+        uint64_t r0 = rand[p];
+        p = (p + 1) & 15;
+        uint64_t r1 = rand[p];
+        r1 ^= r1 << 31;
+        rand[p] = r1 ^ r0 ^ (r1 >> 11) ^ (r0 >> 30);
+        uint32_t j = (rand[p] * 1181783497276652981U) % (i + 1);
         gatenum t = gate_order[i];
         gate_order[i] = gate_order[j];
         gate_order[j] = t;
-        /* xorshift */
-        rand ^= rand >> 13;
-        rand ^= rand << 17;
-        rand ^= rand >> 5;
       }
     }
   }
@@ -1428,8 +1430,53 @@ static bool load_state(const char *name, state *return_state) {
   return true;
 }
 
+void generate_graph_one_output(const bool andnot, const bool lut, const bool randomize,
+    const int iterations, const int output) {
+  assert(iterations > 0);
+  assert(output >= 0 && output <= 7);
+  state st;
+  st.max_sat_metric = INT_MAX;
+  st.sat_metric = 0;
+  st.max_gates = MAX_GATES;
+  st.num_gates = 8;
+  memset(st.gates, 0, sizeof(gate) * MAX_GATES);
+  for (uint8_t i = 0; i < 8; i++) {
+    st.gates[i].type = IN;
+    st.gates[i].table = generate_target(i, false);
+    st.gates[i].in1 = NO_GATE;
+    st.gates[i].in2 = NO_GATE;
+    st.gates[i].in3 = NO_GATE;
+    st.gates[i].function = 0;
+    st.outputs[i] = NO_GATE;
+  }
+  for (int iter = 0; iter < iterations; iter++) {
+    state nst = st;
+
+    int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+    const ttable mask = ~_mm256_setzero_si256();
+    nst.outputs[output] = create_circuit(&nst, g_target[output], mask, bits, andnot, lut,
+        randomize);
+    if (nst.outputs[output] == NO_GATE) {
+      printf("(%d/%d): Not found.\n", iter + 1, iterations);
+      continue;
+    }
+    printf("(%d/%d): %d gates. SAT metric: %d\n", iter + 1, iterations, nst.num_gates - 8,
+        nst.sat_metric);
+    save_state(nst);
+    if (g_metric == GATES) {
+      if (nst.num_gates < st.max_gates) {
+        st.max_gates = nst.num_gates;
+      }
+    } else {
+      if (nst.sat_metric < st.max_sat_metric) {
+        st.max_sat_metric = nst.sat_metric;
+      }
+    }
+  }
+}
+
 /* Called by main to generate a graph. */
-void generate_graph(const bool andnot, const bool lut, const bool randomize) {
+void generate_graph(const bool andnot, const bool lut, const bool randomize, const int iterations) {
   uint8_t num_start_states = 1;
   state start_states[8];
   start_states[0].max_sat_metric = INT_MAX;
@@ -1469,50 +1516,53 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize) {
       printf("Done.\n");
       break;
     }
-    printf("Generating circuits with %d output%s.\n", num_outputs + 1, num_outputs == 0 ? "" : "s");
-    for (uint8_t current_state = 0; current_state < num_start_states; current_state++) {
-      start_states[current_state].max_gates = max_gates;
-      start_states[current_state].max_sat_metric = max_sat_metric;
+    for (int iter = 0; iter < iterations; iter++) {
+      printf("Generating circuits with %d output%s. (%d/%d)\n", num_outputs + 1,
+          num_outputs == 0 ? "" : "s", iter + 1, iterations);
+      for (uint8_t current_state = 0; current_state < num_start_states; current_state++) {
+        start_states[current_state].max_gates = max_gates;
+        start_states[current_state].max_sat_metric = max_sat_metric;
 
-      /* Add all outputs not already present to see which resulting network is the smallest. */
-      for (uint8_t output = 0; output < 8; output++) {
-        if (start_states[current_state].outputs[output] != NO_GATE) {
-          printf("Skipping output %d.\n", output);
-          continue;
-        }
-        printf("Generating circuit for output %d...\n", output);
-        int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-        state st = start_states[current_state];
-        if (g_metric == GATES) {
-          st.max_gates = max_gates;
-        } else {
-          st.max_sat_metric = max_sat_metric;
-        }
-        const ttable mask = ~_mm256_setzero_si256();
-        st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot, lut,
-            randomize);
-        if (st.outputs[output] == NO_GATE) {
-          printf("No solution for output %d.\n", output);
-          continue;
-        }
-        assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
-        save_state(st);
+        /* Add all outputs not already present to see which resulting network is the smallest. */
+        for (uint8_t output = 0; output < 8; output++) {
+          if (start_states[current_state].outputs[output] != NO_GATE) {
+            printf("Skipping output %d.\n", output);
+            continue;
+          }
+          printf("Generating circuit for output %d...\n", output);
+          int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+          state st = start_states[current_state];
+          if (g_metric == GATES) {
+            st.max_gates = max_gates;
+          } else {
+            st.max_sat_metric = max_sat_metric;
+          }
+          const ttable mask = ~_mm256_setzero_si256();
+          st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot, lut,
+              randomize);
+          if (st.outputs[output] == NO_GATE) {
+            printf("No solution for output %d.\n", output);
+            continue;
+          }
+          assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
+          save_state(st);
 
-        if (g_metric == GATES) {
-          if (max_gates > st.num_gates) {
-            max_gates = st.num_gates;
-            num_out_states = 0;
-          }
-          if (st.num_gates <= max_gates) {
-            out_states[num_out_states++] = st;
-          }
-        } else {
-          if (max_sat_metric > st.sat_metric) {
-            max_sat_metric = st.sat_metric;
-            num_out_states = 0;
-          }
-          if (st.sat_metric <= max_sat_metric) {
-            out_states[num_out_states++] = st;
+          if (g_metric == GATES) {
+            if (max_gates > st.num_gates) {
+              max_gates = st.num_gates;
+              num_out_states = 0;
+            }
+            if (st.num_gates <= max_gates) {
+              out_states[num_out_states++] = st;
+            }
+          } else {
+            if (max_sat_metric > st.sat_metric) {
+              max_sat_metric = st.sat_metric;
+              num_out_states = 0;
+            }
+            if (st.sat_metric <= max_sat_metric) {
+              out_states[num_out_states++] = st;
+            }
           }
         }
       }
@@ -1541,8 +1591,9 @@ int main(int argc, char **argv) {
   char *fname = NULL;
   int oneoutput = -1;
   int permute = 0;
+  int iterations = 1;
   int c;
-  while ((c = getopt(argc, argv, "c:d:hlno:p:rsv")) != -1) {
+  while ((c = getopt(argc, argv, "c:d:hi:lno:p:rsv")) != -1) {
     switch (c) {
       case 'c':
         output_c = true;
@@ -1557,14 +1608,21 @@ int main(int argc, char **argv) {
             "-c file   Output C function.\n"
             "-d file   Output DOT digraph.\n"
             "-h        Display this help.\n"
+            "-i n      Do n iterations per step.\n"
             "-l        Generate LUT graph.\n"
             "-n        Use ANDNOT gates.\n"
-            "-o n      Generate one-output graphs for output n until stopped. Implies -r.\n"
+            "-o n      Generate one-output graph for output n.\n"
             "-p value  Permute sbox by XORing input with value.\n"
             "-r        Enable randomization.\n"
             "-s        Use SAT metric.\n"
             "-v        Increase verbosity.\n\n");
         return 0;
+      case 'i':
+        iterations = atoi(optarg);
+        if (iterations < 1) {
+          fprintf(stderr, "Bad iterations value: %s\n", optarg);
+        }
+        break;
       case 'l':
         lut_graph = true;
         break;
@@ -1577,7 +1635,6 @@ int main(int argc, char **argv) {
           fprintf(stderr, "Bad output value: %s\n", optarg);
           return 1;
         }
-        randomize = true;
         break;
       case 'p':
         permute = atoi(optarg);
@@ -1644,47 +1701,9 @@ int main(int argc, char **argv) {
   }
 
   if (oneoutput != -1) {
-    state st;
-    st.max_sat_metric = INT_MAX;
-    st.sat_metric = 0;
-    st.max_gates = MAX_GATES;
-    st.num_gates = 8;
-    memset(st.gates, 0, sizeof(gate) * MAX_GATES);
-    for (uint8_t i = 0; i < 8; i++) {
-      st.gates[i].type = IN;
-      st.gates[i].table = generate_target(i, false);
-      st.gates[i].in1 = NO_GATE;
-      st.gates[i].in2 = NO_GATE;
-      st.gates[i].in3 = NO_GATE;
-      st.gates[i].function = 0;
-      st.outputs[i] = NO_GATE;
-    }
-    int num = 0;
-    while (1) {
-      state nst = st;
-
-      int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-      const ttable mask = ~_mm256_setzero_si256();
-      nst.outputs[oneoutput] = create_circuit(&nst, g_target[oneoutput], mask, bits, andnot,
-          lut_graph, randomize);
-      if (nst.outputs[oneoutput] == NO_GATE) {
-        printf("%d: Not found.\n", num++);
-        continue;
-      }
-      printf("%d: %d gates. SAT metric: %d\n", num++, nst.num_gates - 8, nst.sat_metric);
-      save_state(nst);
-      if (g_metric == GATES) {
-        if (nst.num_gates < st.max_gates) {
-          st.max_gates = nst.num_gates;
-        }
-      } else {
-        if (nst.sat_metric < st.max_sat_metric) {
-          st.max_sat_metric = nst.sat_metric;
-        }
-      }
-    }
+    generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput);
   } else {
-    generate_graph(andnot, lut_graph, randomize);
+    generate_graph(andnot, lut_graph, randomize, iterations);
   }
 
   if (g_rand_fp != NULL) {
