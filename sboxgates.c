@@ -475,31 +475,25 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   }
 
   if (randomize) {
-    if (g_rand_fp == NULL) {
-      g_rand_fp = fopen("/dev/urandom", "r");
+    assert(g_rand_fp != NULL);
+    /* Fisher-Yates shuffle. With a 1024 bit PRNG state, we can theoretically get every
+       permutation of lists with less than or equal to 170 elements. */
+    uint64_t rand[16];
+    if (fread(&rand, 16 * sizeof(uint64_t), 1, g_rand_fp) != 1) {
+      fprintf(stderr, "Error when reading from /dev/urandom.\n");
     }
-    if (g_rand_fp == NULL) {
-      fprintf(stderr, "Error when opening /dev/urandom.\n");
-    } else {
-      /* Fisher-Yates shuffle. With a 1024 bit PRNG state, we can theoretically get every
-         permutation of lists with less than or equal to 170 elements. */
-      uint64_t rand[16];
-      if (fread(&rand, 16 * sizeof(uint64_t), 1, g_rand_fp) != 1) {
-        fprintf(stderr, "Error when reading from /dev/urandom.\n");
-      }
-      int p = 0;
-      for (uint32_t i = st->num_gates - 1; i > 0; i--) {
-        /* xorshift1024* */
-        uint64_t r0 = rand[p];
-        p = (p + 1) & 15;
-        uint64_t r1 = rand[p];
-        r1 ^= r1 << 31;
-        rand[p] = r1 ^ r0 ^ (r1 >> 11) ^ (r0 >> 30);
-        uint32_t j = (rand[p] * 1181783497276652981U) % (i + 1);
-        gatenum t = gate_order[i];
-        gate_order[i] = gate_order[j];
-        gate_order[j] = t;
-      }
+    int p = 0;
+    for (uint32_t i = st->num_gates - 1; i > 0; i--) {
+      /* xorshift1024* */
+      uint64_t r0 = rand[p];
+      p = (p + 1) & 15;
+      uint64_t r1 = rand[p];
+      r1 ^= r1 << 31;
+      rand[p] = r1 ^ r0 ^ (r1 >> 11) ^ (r0 >> 30);
+      uint32_t j = (rand[p] * 1181783497276652981U) % (i + 1);
+      gatenum t = gate_order[i];
+      gate_order[i] = gate_order[j];
+      gate_order[j] = t;
     }
   }
 
@@ -1477,8 +1471,9 @@ void generate_graph_one_output(const bool andnot, const bool lut, const bool ran
 
 /* Called by main to generate a graph. */
 void generate_graph(const bool andnot, const bool lut, const bool randomize, const int iterations) {
-  uint8_t num_start_states = 1;
-  state start_states[8];
+  int num_start_states = 1;
+  state *start_states = malloc(sizeof(state));
+  assert(start_states != NULL);
   start_states[0].max_sat_metric = INT_MAX;
   start_states[0].sat_metric = 0;
   start_states[0].max_gates = MAX_GATES;
@@ -1500,8 +1495,10 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
   while (1) {
     gatenum max_gates = MAX_GATES;
     int max_sat_metric = INT_MAX;
-    state out_states[8];
-    uint8_t num_out_states = 0;
+    state *out_states = malloc(4 * sizeof(state));
+    assert(out_states != NULL);
+    int num_out_states = 0;
+    int out_states_alloc = 4;
 
     /* Count the outputs already present in the first of the start states. All start states will
        have the same number of outputs. */
@@ -1514,6 +1511,8 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
     if (num_outputs >= 8) {
       /* If the input gate network has eight outputs, there is nothing more to do. */
       printf("Done.\n");
+      free(out_states);
+      free(start_states);
       break;
     }
     for (int iter = 0; iter < iterations; iter++) {
@@ -1553,6 +1552,11 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
               num_out_states = 0;
             }
             if (st.num_gates <= max_gates) {
+              if (num_out_states == out_states_alloc) {
+                out_states_alloc *= 2;
+                out_states = realloc(out_states, out_states_alloc * sizeof(state));
+                assert(out_states != NULL);
+              }
               out_states[num_out_states++] = st;
             }
           } else {
@@ -1561,6 +1565,11 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
               num_out_states = 0;
             }
             if (st.sat_metric <= max_sat_metric) {
+              if (num_out_states == out_states_alloc) {
+                out_states_alloc *= 2;
+                out_states = realloc(out_states, out_states_alloc * sizeof(state));
+                assert(out_states != NULL);
+              }
               out_states[num_out_states++] = st;
             }
           }
@@ -1574,9 +1583,8 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
       printf("Found %d state%s with SAT metric %d.\n", num_out_states,
           num_out_states == 1 ? "" : "s", max_sat_metric);
     }
-    for (uint8_t i = 0; i < num_out_states; i++) {
-      start_states[i] = out_states[i];
-    }
+    free(start_states);
+    start_states = out_states;
     num_start_states = num_out_states;
   }
 }
@@ -1700,15 +1708,20 @@ int main(int argc, char **argv) {
     g_target[i] = generate_target(i, true);
   }
 
+  g_rand_fp = fopen("/dev/urandom", "r");
+  if (g_rand_fp == NULL) {
+    fprintf(stderr, "Error opening /dev/urandom.\n");
+    return 1;
+  }
+
   if (oneoutput != -1) {
     generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput);
   } else {
     generate_graph(andnot, lut_graph, randomize, iterations);
   }
 
-  if (g_rand_fp != NULL) {
-    fclose(g_rand_fp);
-  }
+  assert(g_rand_fp != NULL):
+  fclose(g_rand_fp);
 
   return 0;
 }
