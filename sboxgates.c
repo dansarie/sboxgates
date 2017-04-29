@@ -363,6 +363,16 @@ static inline bool get_lut_function(const ttable in1, const ttable in2, const tt
     }
   }
 
+  /* Randomize don't-cares in table. */
+  if (tableset != 0xff) {
+    assert(g_rand_fp != NULL);
+    uint8_t rand;
+    if (fread(&rand, sizeof(uint8_t), 1, g_rand_fp) != 1) {
+      fprintf(stderr, "Error when reading from /dev/urandom.\n");
+    }
+    *func |= ~tableset & rand;
+  }
+
   return true;
 }
 
@@ -475,21 +485,14 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
   if (randomize) {
     assert(g_rand_fp != NULL);
-    /* Fisher-Yates shuffle. With a 1024 bit PRNG state, we can theoretically get every
-       permutation of lists with less than or equal to 170 elements. */
-    uint64_t rand[16];
-    if (fread(&rand, 16 * sizeof(uint64_t), 1, g_rand_fp) != 1) {
+    const int nrand = st->num_gates - 1;
+    uint16_t rand[nrand];
+    if (fread(&rand, sizeof(uint16_t), nrand, g_rand_fp) != nrand) {
       fprintf(stderr, "Error when reading from /dev/urandom.\n");
     }
-    int p = 0;
+    /* Fisher-Yates shuffle. */
     for (uint32_t i = st->num_gates - 1; i > 0; i--) {
-      /* xorshift1024* */
-      uint64_t r0 = rand[p];
-      p = (p + 1) & 15;
-      uint64_t r1 = rand[p];
-      r1 ^= r1 << 31;
-      rand[p] = r1 ^ r0 ^ (r1 >> 11) ^ (r0 >> 30);
-      uint32_t j = (rand[p] * 1181783497276652981U) % (i + 1);
+      uint16_t j = rand[i - 1] % (i + 1);
       gatenum t = gate_order[i];
       gate_order[i] = gate_order[j];
       gate_order[j] = t;
