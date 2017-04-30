@@ -1298,9 +1298,19 @@ static bool load_state(const char *name, state *return_state) {
   fseek(fp, 0, SEEK_SET);
   msgpack_unpacker unp;
   if (!msgpack_unpacker_init(&unp, fsize)) {
+    fclose(fp);
     return false;
   }
+  if (msgpack_unpacker_buffer_capacity(&unp) < fsize) {
+    if (!msgpack_unpacker_reserve_buffer(&unp, fsize)) {
+      fclose(fp);
+      msgpack_unpacker_destroy(&unp);
+      return false;
+    }
+  }
   if (fread(msgpack_unpacker_buffer(&unp), fsize, 1, fp) != 1) {
+    fclose(fp);
+    msgpack_unpacker_destroy(&unp);
     return false;
   }
   fclose(fp);
