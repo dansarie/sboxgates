@@ -52,6 +52,14 @@ typedef struct {
   gate gates[MAX_GATES];
 } state;
 
+#ifdef USE_MPI
+typedef struct {
+  state st;
+  ttable target;
+  ttable mask;
+} mpi_work;
+#endif
+
 const uint8_t g_lattice_sbox[] = {
     0x9c, 0xf2, 0x14, 0xc1, 0x8e, 0xcb, 0xb2, 0x65, 0x97, 0x7a, 0x60, 0x17, 0x92, 0xf9, 0x78, 0x41,
     0x07, 0x4c, 0x67, 0x6d, 0x66, 0x4a, 0x30, 0x7d, 0x53, 0x9d, 0xb5, 0xbc, 0xc3, 0xca, 0xf1, 0x04,
@@ -497,6 +505,296 @@ static inline bool check_7lut_possible(const ttable target, const ttable mask, c
   return ttable_equals_mask(target, match, mask);
 }
 
+#ifdef USE_MPI
+static inline int64_t n_choose_k(int n, int k) {
+  assert(n > 0);
+  assert(k >= 0);
+  int64_t ret = 1;
+  for (int i = 1; i <= k; i++) {
+    ret *= (n - i + 1);
+    ret /= i;
+  }
+  return ret;
+}
+
+/* Generates the nth combination of num_gates choose t gates numbered first, first + 1, ...
+   Return combination in ret[t]. */
+static void get_nth_combination(int64_t n, int num_gates, int t, gatenum first,
+    gatenum *ret) {
+  assert(ret != NULL);
+  assert(t < num_gates);
+
+  if (t == 0) {
+    return;
+  }
+
+  ret[0] = first;
+
+  for (int i = 0; i < num_gates; i++) {
+    if (n == 0) {
+      for (int k = 1; k < t; k++) {
+        ret[k] = ret[0] + k;
+      }
+      return;
+    }
+    int64_t nck = n_choose_k(num_gates - i - 1, t - 1);
+    if (n < nck) {
+      get_nth_combination(n, num_gates - ret[0] + first - 1, t - 1, ret[0] + 1, ret + 1);
+      return;
+    }
+    ret[0] += 1;
+    n -= nck;
+  }
+  assert(0);
+}
+
+/* Creates the next combination of t numbers from the set 0, 1, ..., max - 1. */
+static inline void next_combination(gatenum *combination, int t, int max) {
+  int i = t - 1;
+  while (i >= 0) {
+    if (combination[i] + t - i < max) {
+      break;
+    }
+    i--;
+  }
+  if (i < 0) {
+    return;
+  }
+  combination[i] += 1;
+  for (int k = i + 1; k < t; k++) {
+    combination[k] = combination[k - 1] + 1;
+  }
+}
+
+static void search_5lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
+  assert(ret != NULL);
+
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  uint8_t func_order[256];
+  for (int i = 0; i < 256; i++) {
+    func_order[i] = i;
+  }
+  /* Fisher-Yates shuffle. */
+  for (int i = 0; i < 256; i++) {
+    uint64_t j = xorshift1024() % (i + 1);
+    uint8_t t = func_order[i];
+    func_order[i] = func_order[j];
+    func_order[j] = t;
+  }
+
+  /* Determine this rank's work. */
+  uint64_t search_space_size = n_choose_k(st.num_gates, 5);
+  uint64_t worker_space_size = search_space_size / size;
+  uint64_t remainder = search_space_size - worker_space_size * size;
+  uint64_t start_n;
+  uint64_t stop_n;
+  if (rank < remainder) {
+    start_n = (worker_space_size + 1) * rank;
+    stop_n = start_n + worker_space_size + 1;
+  } else {
+    start_n = (worker_space_size + 1) * remainder + worker_space_size * (rank - remainder);
+    stop_n = start_n + worker_space_size;
+  }
+  gatenum nums[5] = {NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE};
+  get_nth_combination(start_n, st.num_gates, 5, 0, nums);
+
+  ttable tt[5] = {st.gates[nums[0]].table, st.gates[nums[1]].table, st.gates[nums[2]].table,
+      st.gates[nums[3]].table, st.gates[nums[4]].table};
+  gatenum cache_set[3] = {NO_GATE, NO_GATE, NO_GATE};
+  ttable cache[256];
+  for (uint64_t i = start_n; i < stop_n; i++) {
+    if (check_5lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4])) {
+      if (cache_set[0] != nums[0] || cache_set[1] != nums[1] || cache_set[2] != nums[2]) {
+        generate_lut_ttables(tt[0], tt[1], tt[2], cache);
+        cache_set[0] = nums[0];
+        cache_set[1] = nums[1];
+        cache_set[2] = nums[2];
+      }
+      for (uint16_t fo = 0; fo < 256; fo++) {
+        uint8_t func_outer = func_order[fo];
+        ttable t_outer = cache[func_outer];
+        uint8_t func_inner;
+        if (!get_lut_function(t_outer, tt[3], tt[4], target, mask, true, &func_inner)) {
+          continue;
+        }
+        ttable t_inner = generate_lut_ttable(func_inner, t_outer, tt[3], tt[4]);
+        assert(ttable_equals_mask(target, t_inner, mask));
+        ret[0] = func_outer;
+        ret[1] = func_inner;
+        ret[2] = nums[0];
+        ret[3] = nums[1];
+        ret[4] = nums[2];
+        ret[5] = nums[3];
+        ret[6] = nums[4];
+        return;
+      }
+    }
+    next_combination(nums, 5, st.num_gates);
+  }
+  memset(ret, 0, 7 * sizeof(uint16_t));
+  return;
+}
+
+static void search_7lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
+  assert(ret != NULL);
+
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  /* Determine this rank's work. */
+  uint64_t search_space_size = n_choose_k(st.num_gates, 7);
+  uint64_t worker_space_size = search_space_size / size;
+  uint64_t remainder = search_space_size - worker_space_size * size;
+  uint64_t start;
+  uint64_t stop;
+  if (rank < remainder) {
+    start = (worker_space_size + 1) * rank;
+    stop = start + worker_space_size + 1;
+  } else {
+    start = (worker_space_size + 1) * remainder + worker_space_size * (rank - remainder);
+    stop = start + worker_space_size;
+  }
+  gatenum nums[7];
+  get_nth_combination(start, st.num_gates, 7, 0, nums);
+
+  ttable tt[7] = {st.gates[nums[0]].table, st.gates[nums[1]].table, st.gates[nums[2]].table,
+      st.gates[nums[3]].table, st.gates[nums[4]].table, st.gates[nums[5]].table,
+      st.gates[nums[6]].table};
+
+  /* Filter out the gate combinations where a 7LUT is possible. */
+  gatenum *result = malloc(7 * 100000 * sizeof(gatenum));
+  assert(result != NULL);
+  int p = 0;
+  for (uint64_t i = start; i < stop; i++) {
+    if (check_7lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4], tt[5], tt[6])) {
+      result[p++] = nums[0];
+      result[p++] = nums[1];
+      result[p++] = nums[2];
+      result[p++] = nums[3];
+      result[p++] = nums[4];
+      result[p++] = nums[5];
+      result[p++] = nums[6];
+    }
+    if (p >= 7 * 100000) {
+      break;
+    }
+    next_combination(nums, 7, st.num_gates);
+  }
+
+  /* Gather the number of hits for each rank.*/
+  int rank_nums[size];
+  MPI_Allgather(&p, 1, MPI_INT, rank_nums, 1, MPI_INT, MPI_COMM_WORLD);
+  assert(rank_nums[0] % 7 == 0);
+  int tsize = rank_nums[0];
+  int offsets[size];
+  offsets[0] = 0;
+  for (int i = 1; i < size; i++) {
+    assert(rank_nums[i] % 7 == 0);
+    tsize += rank_nums[i];
+    offsets[i] = offsets[i - 1] + rank_nums[i - 1];
+  }
+
+  gatenum *lut_list = malloc(tsize * sizeof(gatenum));
+  assert(lut_list != NULL);
+
+  /* Get all hits. */
+  MPI_Allgatherv(result, p, MPI_UINT16_T, lut_list, rank_nums, offsets, MPI_UINT16_T,
+      MPI_COMM_WORLD);
+  free(result);
+  result = NULL;
+
+  /* Calculate this rank's work. */
+  worker_space_size = (tsize / 7) / size;
+  remainder = (tsize / 7) - worker_space_size * size;
+  if (rank < remainder) {
+    start = (worker_space_size + 1) * rank;
+    stop  = start + worker_space_size + 1;
+  } else {
+    start = (worker_space_size + 1) * remainder + worker_space_size * (rank - remainder);
+    stop = start + worker_space_size;
+  }
+
+  uint8_t outer_func_order[256];
+  uint8_t middle_func_order[256];
+  for (int i = 0; i < 256; i++) {
+    outer_func_order[i] = middle_func_order[i] = i;
+  }
+
+  /* Fisher-Yates shuffle the function search orders. */
+  for (int i = 0; i < 256; i++) {
+    uint64_t oj = xorshift1024() % (i + 1);
+    uint64_t mj = xorshift1024() % (i + 1);
+    uint8_t ot = outer_func_order[i];
+    uint8_t mt = middle_func_order[i];
+    outer_func_order[i] = outer_func_order[oj];
+    middle_func_order[i] = middle_func_order[mj];
+    outer_func_order[oj] = ot;
+    middle_func_order[mj] = mt;
+  }
+  int outer_cache_set = 0;
+  int middle_cache_set = 0;
+  ttable outer_cache[256];
+  ttable middle_cache[256];
+  memset(ret, 0, 10 * sizeof(uint16_t));
+  for (int i = start; i < stop; i++) {
+    const gatenum a = lut_list[7 * i];
+    const gatenum b = lut_list[7 * i + 1];
+    const gatenum c = lut_list[7 * i + 2];
+    const gatenum d = lut_list[7 * i + 3];
+    const gatenum e = lut_list[7 * i + 4];
+    const gatenum f = lut_list[7 * i + 5];
+    const gatenum g = lut_list[7 * i + 6];
+    const ttable ta = st.gates[a].table;
+    const ttable tb = st.gates[b].table;
+    const ttable tc = st.gates[c].table;
+    const ttable td = st.gates[d].table;
+    const ttable te = st.gates[e].table;
+    const ttable tf = st.gates[f].table;
+    const ttable tg = st.gates[g].table;
+    if (((uint64_t)a << 32 | (uint64_t)b << 16 | c) != outer_cache_set) {
+      generate_lut_ttables(ta, tb, tc, outer_cache);
+      outer_cache_set = (uint64_t)a << 32 | (uint64_t)b << 16 | c;
+    }
+    if (((uint64_t)d << 32 | (uint64_t)e << 16 | f) != middle_cache_set) {
+      generate_lut_ttables(td, te, tf, middle_cache);
+      middle_cache_set = (uint64_t)d << 32 | (uint64_t)e << 16 | f;
+    }
+    for (uint16_t fo = 0; fo < 256; fo++) {
+      uint8_t func_outer = outer_func_order[fo];
+      ttable t_outer = outer_cache[func_outer];
+      for (uint16_t fm = 0; fm < 256; fm++) {
+        uint8_t func_middle = middle_func_order[fm];
+        ttable t_middle = middle_cache[func_middle];
+        uint8_t func_inner;
+        if (!get_lut_function(t_outer, t_middle, tg, target, mask, true, &func_inner)) {
+          continue;
+        }
+        ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+        assert(ttable_equals_mask(target, t_inner, mask));
+        ret[0] = func_outer;
+        ret[1] = func_middle;
+        ret[2] = func_inner;
+        ret[3] = a;
+        ret[4] = b;
+        ret[5] = c;
+        ret[6] = d;
+        ret[7] = e;
+        ret[8] = f;
+        ret[9] = g;
+        free(lut_list);
+        return;
+      }
+    }
+  }
+  free(lut_list);
+  return;
+}
+#endif
+
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
    paper. */
 static gatenum create_circuit(state *st, const ttable target, const ttable mask,
@@ -592,6 +890,94 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       }
     }
 
+    #ifdef USE_MPI
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    /* Broadcast work to be done. */
+    mpi_work work = {*st, target, mask};
+    MPI_Bcast(&work, sizeof(work), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    /* Look through all combinations of five gates in the circuit. For each combination, check if
+       a combination of two of the possible 256 three bit boolean functions as in
+       LUT(LUT(a,b,c),d,e) produces the desired map. If so, add those LUTs and return the ID of the
+       output LUT. */
+
+    uint16_t res[10];
+    search_5lut(work.st, work.target, work.mask, res);
+    gatenum *result = malloc(size * 10 * sizeof(gatenum));
+    assert(result != NULL);
+    MPI_Gather(res, 7, MPI_UINT16_T, result, 7, MPI_UINT16_T, 0, MPI_COMM_WORLD);
+
+    /* Search through returned results. */
+    for (int i = 0; i < size * 7; i += 7) {
+      if (result[i] == 0 && result[i + 1] == 0 && result[i + 2] == 0
+          && result[i + 3] == 0 && result[i + 4] == 0 && result[i + 5] == 0
+          && result[i + 6] == 0) {
+        continue;
+      }
+      uint8_t func_outer = (uint8_t)result[i];
+      uint8_t func_inner = (uint8_t)result[i + 1];
+      gatenum a = result[i + 2];
+      gatenum b = result[i + 3];
+      gatenum c = result[i + 4];
+      gatenum d = result[i + 5];
+      gatenum e = result[i + 6];
+      ttable ta = st->gates[a].table;
+      ttable tb = st->gates[b].table;
+      ttable tc = st->gates[c].table;
+      ttable td = st->gates[d].table;
+      ttable te = st->gates[e].table;
+      assert(check_5lut_possible(target, mask, ta, tb, tc, td, te));
+      ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+      ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
+      assert(ttable_equals_mask(target, t_inner, mask));
+      int cmd0 = 0;
+      MPI_Bcast(&cmd0, 1, MPI_INT, 0, MPI_COMM_WORLD);
+      free(result);
+      return add_lut(st, func_inner, t_inner, add_lut(st, func_outer, t_outer, a, b, c), d, e);
+    }
+
+    int cmd7 = 7;
+    MPI_Bcast(&cmd7, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    search_7lut(work.st, work.target, work.mask, res);
+    MPI_Gather(res, 10, MPI_UINT16_T, result, 10, MPI_UINT16_T, 0, MPI_COMM_WORLD);
+
+    for (int i = 0; i < size; i++) {
+      uint8_t func_outer = (uint8_t)result[i * 10];
+      uint8_t func_middle = (uint8_t)result[i * 10 + 1];
+      uint8_t func_inner = (uint8_t)result[i * 10 + 2];
+      gatenum a = result[i * 10 + 3];
+      gatenum b = result[i * 10 + 4];
+      gatenum c = result[i * 10 + 5];
+      gatenum d = result[i * 10 + 6];
+      gatenum e = result[i * 10 + 7];
+      gatenum f = result[i * 10 + 8];
+      gatenum g = result[i * 10 + 9];
+      if (func_outer | func_middle | func_inner | a | b | c | d | e | f | g) {
+        ttable ta = st->gates[a].table;
+        ttable tb = st->gates[b].table;
+        ttable tc = st->gates[c].table;
+        ttable td = st->gates[d].table;
+        ttable te = st->gates[e].table;
+        ttable tf = st->gates[f].table;
+        ttable tg = st->gates[g].table;
+        assert(check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg));
+        ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+        ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
+        ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+        assert(ttable_equals_mask(target, t_inner, mask));
+        free(result);
+        return add_lut(st, func_inner, t_inner,
+            add_lut(st, func_outer, t_outer, a, b, c),
+            add_lut(st, func_middle, t_middle, d, e, f), g);
+      }
+    }
+    free(result);
+    result = NULL;
+
+    #else
     /* Look through all combinations of five gates in the circuit. For each combination, check if
        a combination of two of the possible 256 three bit boolean functions as in
        LUT(LUT(a,b,c),d,e) produces the desired map. If so, add those LUTs and return the ID of the
@@ -702,6 +1088,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         }
       }
     }
+    #endif
 
   } else {
     /* 4. Look at all combinations of two or three gates in the circuit. If they can be combined
@@ -1043,6 +1430,31 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   *st = best;
   return best.num_gates - 1;
 }
+
+#ifdef USE_MPI
+static void mpi_worker() {
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  while (1) {
+    mpi_work work;
+    MPI_Bcast(&work, sizeof(work), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    uint16_t res[10];
+    search_5lut(work.st, work.target, work.mask, res);
+    MPI_Gather(res, 7, MPI_UINT16_T, NULL, 0, MPI_UINT16_T, 0, MPI_COMM_WORLD);
+    int command;
+    MPI_Bcast(&command, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (command == 0) {
+      continue;
+    }
+    assert(command == 7);
+    search_7lut(work.st, work.target, work.mask, res);
+    MPI_Gather(res, 10, MPI_UINT16_T, NULL, 0, MPI_UINT16_T, 0, MPI_COMM_WORLD);
+  }
+}
+#endif
 
 /* If sbox is true, a target truth table for the given bit of the sbox is generated.
    If sbox is false, the truth table of the given input bit is generated. */
@@ -1761,6 +2173,23 @@ int main(int argc, char **argv) {
     g_target[i] = generate_target(i, true);
   }
 
+  #ifdef USE_MPI
+  if (lut_graph) {
+    if (rank != 0) {
+      mpi_worker();
+      MPI_Finalize();
+      return 0;
+    }
+  } else {
+    if (rank == 0) {
+      printf(stderr, "Warning: MPI only works with LUT graphs.\n");
+    } else {
+      MPI_Finalize();
+      return 0;
+    }
+  }
+  #endif
+
   state st;
   if (strlen(gfname) == 0) {
     st.max_sat_metric = INT_MAX;
@@ -1784,7 +2213,7 @@ int main(int argc, char **argv) {
   }
 
   if (oneoutput != -1) {
-      generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput, st);
+    generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput, st);
   } else {
     generate_graph(andnot, lut_graph, randomize, iterations, st);
   }
