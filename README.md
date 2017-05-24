@@ -10,5 +10,5 @@ or on FPGAs.
 ## Build
 
 ```console
-$ gcc -Ofast -march=native sboxgates.c -o sboxgates -lmsgpackc
+$ gcc -Ofast -march=native sboxgates.c state.c -o sboxgates -lmsgpackc
 ```
