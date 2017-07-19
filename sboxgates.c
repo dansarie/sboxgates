@@ -122,18 +122,20 @@ static inline bool ttable_equals_mask(const ttable in1, const ttable in2, const 
 static int get_sat_metric(gate_type type) {
   switch (type) {
     case IN:
-    case NOT:
       return 0;
+    case NOT:
+      return 4;
     case AND:
     case OR:
     case ANDNOT:
-      return 1;
+      return 7;
     case XOR:
-      return 4:
+      return 12;
     case LUT:
     default:
       assert(0);
   }
+  return 0;
 }
 
 /* Adds a gate to the state st. Returns the gate id of the added gate. If an input gate is
@@ -169,6 +171,9 @@ static inline gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid
   assert(gid1 < st->num_gates);
   assert(gid2 < st->num_gates);
   assert(gid3 < st->num_gates);
+  if (gid1 == gid2 || gid2 == gid3 || gid3 == gid1) {
+    printf("%d %d %d\n", gid1, gid2, gid3);
+  }
   assert(gid1 != gid2 && gid2 != gid3 && gid3 != gid1);
   st->gates[st->num_gates].table = table;
   st->gates[st->num_gates].type = LUT;
@@ -569,7 +574,69 @@ static inline void next_combination(gatenum *combination, int t, int max) {
   }
 }
 
-static void search_5lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
+static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_req,
+    MPI_Request *send_req) {
+
+  int rank, size;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  MPI_Request reqs[2] = {*recv_req, MPI_REQUEST_NULL};
+  MPI_Ibarrier(MPI_COMM_WORLD, &reqs[1]);
+  if (rank == 0) {
+    if (*recv_req == MPI_REQUEST_NULL) {
+      for (int i = 1; i < size; i++) {
+        MPI_Send(quit_msg, 1, MPI_INT, i, 2, MPI_COMM_WORLD);
+      }
+    }
+    int index;
+    MPI_Waitany(2, reqs, &index, MPI_STATUSES_IGNORE);
+    if (index == 0) { /* Received 'found' message. */
+      for (int i = 1; i < size; i++) {
+        MPI_Send(quit_msg, 1, MPI_INT, i, 2, MPI_COMM_WORLD);
+      }
+      MPI_Wait(&reqs[1], MPI_STATUS_IGNORE);
+    } else if (*quit_msg == -1) { /* No worker found a LUT. */
+      for (int i = 1; i < size; i++) {
+        MPI_Send(quit_msg, 1, MPI_INT, i, 2, MPI_COMM_WORLD);
+      }
+      MPI_Cancel(&reqs[0]);
+      MPI_Wait(&reqs[0], MPI_STATUS_IGNORE);
+    }
+  } else {
+    MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE);
+  }
+
+  *recv_req = reqs[0];
+
+  if (*quit_msg == -1) {
+    assert(*send_req == MPI_REQUEST_NULL);
+    MPI_Barrier(MPI_COMM_WORLD);
+    return false;
+  }
+
+  MPI_Bcast(ret, 10, MPI_SHORT, *quit_msg, MPI_COMM_WORLD);
+
+  if (*send_req == MPI_REQUEST_NULL) {
+    MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, send_req);
+  }
+
+  if (rank == 0) {
+    for (int i = 0; i < size; i++) {
+      if (i == *quit_msg) {
+        continue;
+      }
+      int buf;
+      MPI_Recv(&buf, 1, MPI_INT, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
+  }
+  MPI_Wait(send_req, MPI_STATUS_IGNORE);
+  MPI_Barrier(MPI_COMM_WORLD);
+  return true;
+}
+
+static bool search_5lut(const state st, const ttable target, const ttable mask,
+    uint16_t *ret) {
   assert(ret != NULL);
 
   int rank, size;
@@ -607,7 +674,20 @@ static void search_5lut(const state st, const ttable target, const ttable mask, 
       st.gates[nums[3]].table, st.gates[nums[4]].table};
   gatenum cache_set[3] = {NO_GATE, NO_GATE, NO_GATE};
   ttable cache[256];
-  for (uint64_t i = start_n; i < stop_n; i++) {
+  memset(ret, 0, sizeof(uint16_t) * 10);
+
+  MPI_Request recv_req = MPI_REQUEST_NULL;
+  MPI_Request send_req = MPI_REQUEST_NULL;
+  int quit_msg = -1;
+
+  if (rank == 0) {
+    MPI_Irecv(&quit_msg, 1, MPI_INT, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &recv_req);
+  } else {
+    MPI_Irecv(&quit_msg, 1, MPI_INT, 0, 2, MPI_COMM_WORLD, &recv_req);
+  }
+
+  bool quit = false;
+  for (uint64_t i = start_n; !quit && i < stop_n; i++) {
     if (check_5lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4])) {
       if (cache_set[0] != nums[0] || cache_set[1] != nums[1] || cache_set[2] != nums[2]) {
         generate_lut_ttables(tt[0], tt[1], tt[2], cache);
@@ -615,7 +695,7 @@ static void search_5lut(const state st, const ttable target, const ttable mask, 
         cache_set[1] = nums[1];
         cache_set[2] = nums[2];
       }
-      for (uint16_t fo = 0; fo < 256; fo++) {
+      for (uint16_t fo = 0; !quit && fo < 256; fo++) {
         uint8_t func_outer = func_order[fo];
         ttable t_outer = cache[func_outer];
         uint8_t func_inner;
@@ -631,16 +711,29 @@ static void search_5lut(const state st, const ttable target, const ttable mask, 
         ret[4] = nums[2];
         ret[5] = nums[3];
         ret[6] = nums[4];
-        return;
+        ret[7] = 0;
+        ret[8] = 0;
+        ret[9] = 0;
+        assert(send_req == MPI_REQUEST_NULL);
+        MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+        quit = true;
       }
     }
-    next_combination(nums, 5, st.num_gates);
+    if (!quit) {
+      int flag;
+      MPI_Test(&recv_req, &flag, MPI_STATUS_IGNORE);
+      if (flag) {
+        break;
+      }
+      next_combination(nums, 5, st.num_gates);
+    }
   }
-  memset(ret, 0, 7 * sizeof(uint16_t));
-  return;
+
+  return get_search_result(ret, &quit_msg, &recv_req, &send_req);
 }
 
-static void search_7lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
+static bool search_7lut(const state st, const ttable target, const ttable mask,
+    uint16_t *ret) {
   assert(ret != NULL);
 
   int rank, size;
@@ -742,7 +835,19 @@ static void search_7lut(const state st, const ttable target, const ttable mask, 
   ttable outer_cache[256];
   ttable middle_cache[256];
   memset(ret, 0, 10 * sizeof(uint16_t));
-  for (int i = start; i < stop; i++) {
+
+  MPI_Request recv_req = MPI_REQUEST_NULL;
+  MPI_Request send_req = MPI_REQUEST_NULL;
+  int quit_msg = -1;
+
+  if (rank == 0) {
+    MPI_Irecv(&quit_msg, 1, MPI_INT, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &recv_req);
+  } else {
+    MPI_Irecv(&quit_msg, 1, MPI_INT, 0, 2, MPI_COMM_WORLD, &recv_req);
+  }
+
+  bool quit = false;
+  for (int i = start; !quit && i < stop; i++) {
     const gatenum a = lut_list[7 * i];
     const gatenum b = lut_list[7 * i + 1];
     const gatenum c = lut_list[7 * i + 2];
@@ -765,10 +870,10 @@ static void search_7lut(const state st, const ttable target, const ttable mask, 
       generate_lut_ttables(td, te, tf, middle_cache);
       middle_cache_set = (uint64_t)d << 32 | (uint64_t)e << 16 | f;
     }
-    for (uint16_t fo = 0; fo < 256; fo++) {
+    for (uint16_t fo = 0; !quit && fo < 256; fo++) {
       uint8_t func_outer = outer_func_order[fo];
       ttable t_outer = outer_cache[func_outer];
-      for (uint16_t fm = 0; fm < 256; fm++) {
+      for (uint16_t fm = 0; !quit && fm < 256; fm++) {
         uint8_t func_middle = middle_func_order[fm];
         ttable t_middle = middle_cache[func_middle];
         uint8_t func_inner;
@@ -787,13 +892,21 @@ static void search_7lut(const state st, const ttable target, const ttable mask, 
         ret[7] = e;
         ret[8] = f;
         ret[9] = g;
-        free(lut_list);
-        return;
+        assert(send_req == MPI_REQUEST_NULL);
+        MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+        quit = true;
+      }
+    }
+    if (!quit) {
+      int flag;
+      MPI_Test(&recv_req, &flag, MPI_STATUS_IGNORE);
+      if (flag) {
+        quit = true;
       }
     }
   }
   free(lut_list);
-  return;
+  return get_search_result(ret, &quit_msg, &recv_req, &send_req);
 }
 #endif
 
@@ -851,9 +964,6 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (ttable_equals(mtarget, ti & tk)) {
         return add_and_gate(st, gi, gk);
       }
-      if (ttable_equals(mtarget, ti ^ tk)) {
-        return add_xor_gate(st, gi, gk);
-      }
       if (andnot) {
         if (ttable_equals_mask(target, ~ti & tk, mask)) {
           return add_andnot_gate(st, gi, gk);
@@ -861,6 +971,9 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         if (ttable_equals_mask(target, ~tk & ti, mask)) {
           return add_andnot_gate(st, gk, gi);
         }
+      }
+      if (ttable_equals(mtarget, ti ^ tk)) {
+        return add_xor_gate(st, gi, gk);
       }
     }
   }
@@ -906,78 +1019,65 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
        output LUT. */
 
     uint16_t res[10];
-    search_5lut(work.st, work.target, work.mask, res);
-    gatenum *result = malloc(size * 10 * sizeof(gatenum));
-    assert(result != NULL);
-    MPI_Gather(res, 7, MPI_UINT16_T, result, 7, MPI_UINT16_T, 0, MPI_COMM_WORLD);
+    memset(res, 0, sizeof(uint16_t) * 10);
+    printf("[   0] Search 5.\n");
 
-    /* Search through returned results. */
-    for (int i = 0; i < size * 7; i += 7) {
-      if (result[i] == 0 && result[i + 1] == 0 && result[i + 2] == 0
-          && result[i + 3] == 0 && result[i + 4] == 0 && result[i + 5] == 0
-          && result[i + 6] == 0) {
-        continue;
-      }
-      uint8_t func_outer = (uint8_t)result[i];
-      uint8_t func_inner = (uint8_t)result[i + 1];
-      gatenum a = result[i + 2];
-      gatenum b = result[i + 3];
-      gatenum c = result[i + 4];
-      gatenum d = result[i + 5];
-      gatenum e = result[i + 6];
+    if (search_5lut(work.st, work.target, work.mask, res)) {
+      uint8_t func_outer = (uint8_t)res[0];
+      uint8_t func_inner = (uint8_t)res[1];
+      gatenum a = res[2];
+      gatenum b = res[3];
+      gatenum c = res[4];
+      gatenum d = res[5];
+      gatenum e = res[6];
       ttable ta = st->gates[a].table;
       ttable tb = st->gates[b].table;
       ttable tc = st->gates[c].table;
       ttable td = st->gates[d].table;
       ttable te = st->gates[e].table;
+      printf("[   0] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n",
+          func_outer, func_inner, a, b, c, d, e);
       assert(check_5lut_possible(target, mask, ta, tb, tc, td, te));
       ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
       ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
       assert(ttable_equals_mask(target, t_inner, mask));
-      int cmd0 = 0;
-      MPI_Bcast(&cmd0, 1, MPI_INT, 0, MPI_COMM_WORLD);
-      free(result);
-      return add_lut(st, func_inner, t_inner, add_lut(st, func_outer, t_outer, a, b, c), d, e);
+
+      return add_lut(st, func_inner, t_inner,
+          add_lut(st, func_outer, t_outer, a, b, c), d, e);
     }
 
-    int cmd7 = 7;
-    MPI_Bcast(&cmd7, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    search_7lut(work.st, work.target, work.mask, res);
-    MPI_Gather(res, 10, MPI_UINT16_T, result, 10, MPI_UINT16_T, 0, MPI_COMM_WORLD);
-
-    for (int i = 0; i < size; i++) {
-      uint8_t func_outer = (uint8_t)result[i * 10];
-      uint8_t func_middle = (uint8_t)result[i * 10 + 1];
-      uint8_t func_inner = (uint8_t)result[i * 10 + 2];
-      gatenum a = result[i * 10 + 3];
-      gatenum b = result[i * 10 + 4];
-      gatenum c = result[i * 10 + 5];
-      gatenum d = result[i * 10 + 6];
-      gatenum e = result[i * 10 + 7];
-      gatenum f = result[i * 10 + 8];
-      gatenum g = result[i * 10 + 9];
-      if (func_outer | func_middle | func_inner | a | b | c | d | e | f | g) {
-        ttable ta = st->gates[a].table;
-        ttable tb = st->gates[b].table;
-        ttable tc = st->gates[c].table;
-        ttable td = st->gates[d].table;
-        ttable te = st->gates[e].table;
-        ttable tf = st->gates[f].table;
-        ttable tg = st->gates[g].table;
-        assert(check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg));
-        ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
-        ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
-        ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
-        assert(ttable_equals_mask(target, t_inner, mask));
-        free(result);
-        return add_lut(st, func_inner, t_inner,
-            add_lut(st, func_outer, t_outer, a, b, c),
-            add_lut(st, func_middle, t_middle, d, e, f), g);
-      }
+    printf("[   0] Search 7.\n");
+    if (search_7lut(work.st, work.target, work.mask, res)) {
+      uint8_t func_outer = (uint8_t)res[0];
+      uint8_t func_middle = (uint8_t)res[1];
+      uint8_t func_inner = (uint8_t)res[2];
+      gatenum a = res[3];
+      gatenum b = res[4];
+      gatenum c = res[5];
+      gatenum d = res[6];
+      gatenum e = res[7];
+      gatenum f = res[8];
+      gatenum g = res[9];
+      ttable ta = st->gates[a].table;
+      ttable tb = st->gates[b].table;
+      ttable tc = st->gates[c].table;
+      ttable td = st->gates[d].table;
+      ttable te = st->gates[e].table;
+      ttable tf = st->gates[f].table;
+      ttable tg = st->gates[g].table;
+      printf("[   0] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n",
+          func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
+      assert(check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg));
+      ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+      ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
+      ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+      assert(ttable_equals_mask(target, t_inner, mask));
+      return add_lut(st, func_inner, t_inner,
+          add_lut(st, func_outer, t_outer, a, b, c),
+          add_lut(st, func_middle, t_middle, d, e, f), g);
     }
-    free(result);
-    result = NULL;
+
+    printf("[   0] No LUTs found. Num gates: %d\n", st->num_gates - 8);
 
     #else
     /* Look through all combinations of five gates in the circuit. For each combination, check if
@@ -1104,13 +1204,10 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         const gatenum gk = gate_order[k];
         ttable tk = st->gates[gk].table;
         if (ttable_equals_mask(target, ~(ti | tk), mask)) {
-        return add_nor_gate(st, gi, gk);
+          return add_nor_gate(st, gi, gk);
         }
         if (ttable_equals_mask(target, ~(ti & tk), mask)) {
           return add_nand_gate(st, gi, gk);
-        }
-        if (ttable_equals_mask(target, ~(ti ^ tk), mask)) {
-          return add_xnor_gate(st, gi, gk);
         }
         if (ttable_equals_mask(target, ~ti | tk, mask)) {
           return add_or_not_gate(st, gi, gk);
@@ -1128,8 +1225,12 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         } else if (ttable_equals_mask(target, ~ti & ~tk, mask)) {
           return add_andnot_gate(st, gi, add_not_gate(st, gk));
         }
+        if (ttable_equals_mask(target, ~(ti ^ tk), mask)) {
+          return add_xnor_gate(st, gi, gk);
+        }
       }
     }
+
 
     for (int i = 0; i < st->num_gates; i++) {
       const gatenum gi = gate_order[i];
@@ -1152,68 +1253,27 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           if (ttable_equals(mtarget, iandk | tm)) {
             return add_and_or_gate(st, gi, gk, gm);
           }
-          if (ttable_equals(mtarget, iandk ^ tm)) {
-            return add_and_xor_gate(st, gi, gk, gm);
-          }
           if (ttable_equals(mtarget, iork | tm)) {
             return add_or_3_gate(st, gi, gk, gm);
           }
           if (ttable_equals(mtarget, iork & tm)) {
             return add_or_and_gate(st, gi, gk, gm);
           }
-          if (ttable_equals(mtarget, iork ^ tm)) {
-            return add_or_xor_gate(st, gi, gk, gm);
-          }
-          if (ttable_equals(mtarget, ixork ^ tm)) {
-            return add_xor_3_gate(st, gi, gk, gm);
-          }
-          if (ttable_equals(mtarget, ixork | tm)) {
-            return add_xor_or_gate(st, gi, gk, gm);
-          }
-          if (ttable_equals(mtarget, ixork & tm)) {
-            return add_xor_and_gate(st, gi, gk, gm);
-          }
           ttable iandm = ti & tm;
           if (ttable_equals(mtarget, iandm | tk)) {
             return add_and_or_gate(st, gi, gm, gk);
-          }
-          if (ttable_equals(mtarget, iandm ^ tk)) {
-            return add_and_xor_gate(st, gi, gm, gk);
           }
           ttable kandm = tk & tm;
           if (ttable_equals(mtarget, kandm | ti)) {
             return add_and_or_gate(st, gk, gm, gi);
           }
-          if (ttable_equals(mtarget, kandm ^ ti)) {
-            return add_and_xor_gate(st, gk, gm, gi);
-          }
-          ttable ixorm = ti ^ tm;
-          if (ttable_equals(mtarget, ixorm | tk)) {
-            return add_xor_or_gate(st, gi, gm, gk);
-          }
-          if (ttable_equals(mtarget, ixorm & tk)) {
-            return add_xor_and_gate(st, gi, gm, gk);
-          }
-          ttable kxorm = tk ^ tm;
-          if (ttable_equals(mtarget, kxorm | ti)) {
-            return add_xor_or_gate(st, gk, gm, gi);
-          }
-          if (ttable_equals(mtarget, kxorm & ti)) {
-            return add_xor_and_gate(st, gk, gm, gi);
-          }
           ttable iorm = ti | tm;
           if (ttable_equals(mtarget, iorm & tk)) {
             return add_or_and_gate(st, gi, gm, gk);
           }
-          if (ttable_equals(mtarget, iorm ^ tk)) {
-            return add_or_xor_gate(st, gi, gm, gk);
-          }
           ttable korm = tk | tm;
           if (ttable_equals(mtarget, korm & ti)) {
             return add_or_and_gate(st, gk, gm, gi);
-          }
-          if (ttable_equals(mtarget, korm ^ ti)) {
-            return add_or_xor_gate(st, gk, gm, gi);
           }
           if (andnot) {
             if (ttable_equals(mtarget, ti | (~tk & tm))) {
@@ -1307,6 +1367,47 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
               return add_andnot_xor_gate(st, gi, gk, gm);
             }
           }
+          if (ttable_equals(mtarget, ixork | tm)) {
+            return add_xor_or_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, ixork & tm)) {
+            return add_xor_and_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iandk ^ tm)) {
+            return add_and_xor_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iork ^ tm)) {
+            return add_or_xor_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, ixork ^ tm)) {
+            return add_xor_3_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iandm ^ tk)) {
+            return add_and_xor_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, kandm ^ ti)) {
+            return add_and_xor_gate(st, gk, gm, gi);
+          }
+          ttable ixorm = ti ^ tm;
+          if (ttable_equals(mtarget, ixorm | tk)) {
+            return add_xor_or_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, ixorm & tk)) {
+            return add_xor_and_gate(st, gi, gm, gk);
+          }
+          ttable kxorm = tk ^ tm;
+          if (ttable_equals(mtarget, kxorm | ti)) {
+            return add_xor_or_gate(st, gk, gm, gi);
+          }
+          if (ttable_equals(mtarget, kxorm & ti)) {
+            return add_xor_and_gate(st, gk, gm, gi);
+          }
+          if (ttable_equals(mtarget, iorm ^ tk)) {
+            return add_or_xor_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, korm ^ ti)) {
+            return add_or_xor_gate(st, gk, gm, gi);
+          }
         }
       }
     }
@@ -1327,6 +1428,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   next_inbits[bitp + 1] = -1;
 
   state best;
+  gatenum best_out = NO_GATE;
   best.num_gates = 0;
   best.sat_metric = 0;
 
@@ -1346,28 +1448,45 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
     const ttable fsel = st->gates[bit].table; /* Selection bit. */
     state nst;
+    gatenum nst_out;
     if (lut) {
       nst = *st;
       gatenum fb = create_circuit(&nst, target, mask & ~fsel, next_inbits, andnot, true, randomize);
       if (fb == NO_GATE) {
         continue;
       }
+      assert(ttable_equals_mask(target, nst.gates[fb].table, mask & ~fsel));
       gatenum fc = create_circuit(&nst, target, mask & fsel, next_inbits, andnot, true, randomize);
       if (fc == NO_GATE) {
         continue;
       }
+      assert(ttable_equals_mask(target, nst.gates[fc].table, mask & fsel));
 
-      if (fb == bit || fc == bit) {
-        if (add_or_gate(&nst, fb, fc) == NO_GATE) {
+      if (fb == fc) {
+        nst_out = fb;
+        assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
+      } else if (fb == bit) {
+        nst_out = add_and_gate(&nst, fb, fc);
+        if (nst_out == NO_GATE) {
           continue;
         }
+        assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
+      } else if (fc == bit) {
+        nst_out = add_or_gate(&nst, fb, fc);
+        if (nst_out == NO_GATE) {
+          continue;
+        }
+        assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
       } else {
         ttable mux_table = generate_lut_ttable(0xac, nst.gates[bit].table, nst.gates[fb].table,
             nst.gates[fc].table);
-        if (add_lut(&nst, 0xac, mux_table, bit, fb, fc) == NO_GATE) {
+        nst_out = add_lut(&nst, 0xac, mux_table, bit, fb, fc);
+        if (nst_out == NO_GATE) {
           continue;
         }
+        assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
       }
+      assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
     } else {
       state nst_and = *st; /* New state using AND multiplexer. */
       gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits, andnot,
@@ -1378,6 +1497,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
             next_inbits, andnot, false, randomize);
         gatenum andg = add_and_gate(&nst_and, fc, bit);
         mux_out_and = add_xor_gate(&nst_and, fb, andg);
+        assert(mux_out_and == NO_GATE || ttable_equals_mask(target, nst_and.gates[mux_out_and].table, mask));
       }
 
       state nst_or = *st; /* New state using OR multiplexer. */
@@ -1393,6 +1513,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
             next_inbits, andnot, false, randomize);
         gatenum org = add_or_gate(&nst_or, fe, bit);
         mux_out_or = add_xor_gate(&nst_or, fd, org);
+        assert(mux_out_or == NO_GATE || ttable_equals_mask(target, nst_or.gates[mux_out_or].table, mask));
         nst_or.max_gates = st->max_gates;
         nst_or.max_sat_metric = st->max_sat_metric;
       }
@@ -1404,45 +1525,55 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         if (mux_out_or == NO_GATE
             || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
           nst = nst_and;
+          nst_out = mux_out_and;
         } else {
           nst = nst_or;
+          nst_out = mux_out_or;
         }
       } else {
         if (mux_out_or == NO_GATE
             || (mux_out_and != NO_GATE && nst_and.sat_metric < nst_or.sat_metric)) {
           nst = nst_and;
+          nst_out = mux_out_and;
         } else {
           nst = nst_or;
+          nst_out = mux_out_or;
         }
       }
     }
 
+    assert(best.num_gates == 0 || ttable_equals_mask(target, best.gates[best_out].table, mask));
     if (g_metric == GATES) {
       if (best.num_gates == 0 || nst.num_gates < best.num_gates) {
         best = nst;
+        best_out = nst_out;
       }
     } else {
       if (best.sat_metric == 0 || nst.sat_metric < best.sat_metric) {
         best = nst;
+        best_out = nst_out;
       }
     }
+    assert(best.num_gates == 0 || ttable_equals_mask(target, best.gates[best_out].table, mask));
   }
 
   if (best.num_gates == 0) {
     return NO_GATE;
   }
 
-  assert(ttable_equals_mask(target, best.gates[best.num_gates - 1].table, mask));
+  assert(ttable_equals_mask(target, best.gates[best_out].table, mask));
   *st = best;
-  return best.num_gates - 1;
+  return best_out;
 }
 
 #ifdef USE_MPI
+
 static void mpi_worker() {
   int rank, size;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+  uint16_t res[10];
   while (1) {
     mpi_work work;
     MPI_Bcast(&work, sizeof(work), MPI_BYTE, 0, MPI_COMM_WORLD);
@@ -1450,17 +1581,10 @@ static void mpi_worker() {
       return;
     }
 
-    uint16_t res[10];
-    search_5lut(work.st, work.target, work.mask, res);
-    MPI_Gather(res, 7, MPI_UINT16_T, NULL, 0, MPI_UINT16_T, 0, MPI_COMM_WORLD);
-    int command;
-    MPI_Bcast(&command, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (command == 0) {
+    if (search_5lut(work.st, work.target, work.mask, res)) {
       continue;
     }
-    assert(command == 7);
     search_7lut(work.st, work.target, work.mask, res);
-    MPI_Gather(res, 10, MPI_UINT16_T, NULL, 0, MPI_UINT16_T, 0, MPI_COMM_WORLD);
   }
 }
 #endif
@@ -1658,7 +1782,7 @@ static void save_state(state st) {
   }
 
   char name[40];
-  sprintf(name, "%d-%03d-%03d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
+  sprintf(name, "%d-%03d-%04d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
       state_fingerprint(st));
 
   FILE *fp = fopen(name, "w");
