@@ -122,14 +122,15 @@ static inline bool ttable_equals_mask(const ttable in1, const ttable in2, const 
 static int get_sat_metric(gate_type type) {
   switch (type) {
     case IN:
-    case NOT:
       return 0;
+    case NOT:
+      return 4;
     case AND:
     case OR:
     case ANDNOT:
-      return 1;
+      return 7;
     case XOR:
-      return 4;
+      return 12;
     case LUT:
     default:
       assert(0);
@@ -963,9 +964,6 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (ttable_equals(mtarget, ti & tk)) {
         return add_and_gate(st, gi, gk);
       }
-      if (ttable_equals(mtarget, ti ^ tk)) {
-        return add_xor_gate(st, gi, gk);
-      }
       if (andnot) {
         if (ttable_equals_mask(target, ~ti & tk, mask)) {
           return add_andnot_gate(st, gi, gk);
@@ -973,6 +971,9 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         if (ttable_equals_mask(target, ~tk & ti, mask)) {
           return add_andnot_gate(st, gk, gi);
         }
+      }
+      if (ttable_equals(mtarget, ti ^ tk)) {
+        return add_xor_gate(st, gi, gk);
       }
     }
   }
@@ -1203,13 +1204,10 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         const gatenum gk = gate_order[k];
         ttable tk = st->gates[gk].table;
         if (ttable_equals_mask(target, ~(ti | tk), mask)) {
-        return add_nor_gate(st, gi, gk);
+          return add_nor_gate(st, gi, gk);
         }
         if (ttable_equals_mask(target, ~(ti & tk), mask)) {
           return add_nand_gate(st, gi, gk);
-        }
-        if (ttable_equals_mask(target, ~(ti ^ tk), mask)) {
-          return add_xnor_gate(st, gi, gk);
         }
         if (ttable_equals_mask(target, ~ti | tk, mask)) {
           return add_or_not_gate(st, gi, gk);
@@ -1227,8 +1225,12 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         } else if (ttable_equals_mask(target, ~ti & ~tk, mask)) {
           return add_andnot_gate(st, gi, add_not_gate(st, gk));
         }
+        if (ttable_equals_mask(target, ~(ti ^ tk), mask)) {
+          return add_xnor_gate(st, gi, gk);
+        }
       }
     }
+
 
     for (int i = 0; i < st->num_gates; i++) {
       const gatenum gi = gate_order[i];
@@ -1251,68 +1253,27 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           if (ttable_equals(mtarget, iandk | tm)) {
             return add_and_or_gate(st, gi, gk, gm);
           }
-          if (ttable_equals(mtarget, iandk ^ tm)) {
-            return add_and_xor_gate(st, gi, gk, gm);
-          }
           if (ttable_equals(mtarget, iork | tm)) {
             return add_or_3_gate(st, gi, gk, gm);
           }
           if (ttable_equals(mtarget, iork & tm)) {
             return add_or_and_gate(st, gi, gk, gm);
           }
-          if (ttable_equals(mtarget, iork ^ tm)) {
-            return add_or_xor_gate(st, gi, gk, gm);
-          }
-          if (ttable_equals(mtarget, ixork ^ tm)) {
-            return add_xor_3_gate(st, gi, gk, gm);
-          }
-          if (ttable_equals(mtarget, ixork | tm)) {
-            return add_xor_or_gate(st, gi, gk, gm);
-          }
-          if (ttable_equals(mtarget, ixork & tm)) {
-            return add_xor_and_gate(st, gi, gk, gm);
-          }
           ttable iandm = ti & tm;
           if (ttable_equals(mtarget, iandm | tk)) {
             return add_and_or_gate(st, gi, gm, gk);
-          }
-          if (ttable_equals(mtarget, iandm ^ tk)) {
-            return add_and_xor_gate(st, gi, gm, gk);
           }
           ttable kandm = tk & tm;
           if (ttable_equals(mtarget, kandm | ti)) {
             return add_and_or_gate(st, gk, gm, gi);
           }
-          if (ttable_equals(mtarget, kandm ^ ti)) {
-            return add_and_xor_gate(st, gk, gm, gi);
-          }
-          ttable ixorm = ti ^ tm;
-          if (ttable_equals(mtarget, ixorm | tk)) {
-            return add_xor_or_gate(st, gi, gm, gk);
-          }
-          if (ttable_equals(mtarget, ixorm & tk)) {
-            return add_xor_and_gate(st, gi, gm, gk);
-          }
-          ttable kxorm = tk ^ tm;
-          if (ttable_equals(mtarget, kxorm | ti)) {
-            return add_xor_or_gate(st, gk, gm, gi);
-          }
-          if (ttable_equals(mtarget, kxorm & ti)) {
-            return add_xor_and_gate(st, gk, gm, gi);
-          }
           ttable iorm = ti | tm;
           if (ttable_equals(mtarget, iorm & tk)) {
             return add_or_and_gate(st, gi, gm, gk);
           }
-          if (ttable_equals(mtarget, iorm ^ tk)) {
-            return add_or_xor_gate(st, gi, gm, gk);
-          }
           ttable korm = tk | tm;
           if (ttable_equals(mtarget, korm & ti)) {
             return add_or_and_gate(st, gk, gm, gi);
-          }
-          if (ttable_equals(mtarget, korm ^ ti)) {
-            return add_or_xor_gate(st, gk, gm, gi);
           }
           if (andnot) {
             if (ttable_equals(mtarget, ti | (~tk & tm))) {
@@ -1406,6 +1367,47 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
               return add_andnot_xor_gate(st, gi, gk, gm);
             }
           }
+          if (ttable_equals(mtarget, ixork | tm)) {
+            return add_xor_or_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, ixork & tm)) {
+            return add_xor_and_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iandk ^ tm)) {
+            return add_and_xor_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iork ^ tm)) {
+            return add_or_xor_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, ixork ^ tm)) {
+            return add_xor_3_gate(st, gi, gk, gm);
+          }
+          if (ttable_equals(mtarget, iandm ^ tk)) {
+            return add_and_xor_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, kandm ^ ti)) {
+            return add_and_xor_gate(st, gk, gm, gi);
+          }
+          ttable ixorm = ti ^ tm;
+          if (ttable_equals(mtarget, ixorm | tk)) {
+            return add_xor_or_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, ixorm & tk)) {
+            return add_xor_and_gate(st, gi, gm, gk);
+          }
+          ttable kxorm = tk ^ tm;
+          if (ttable_equals(mtarget, kxorm | ti)) {
+            return add_xor_or_gate(st, gk, gm, gi);
+          }
+          if (ttable_equals(mtarget, kxorm & ti)) {
+            return add_xor_and_gate(st, gk, gm, gi);
+          }
+          if (ttable_equals(mtarget, iorm ^ tk)) {
+            return add_or_xor_gate(st, gi, gm, gk);
+          }
+          if (ttable_equals(mtarget, korm ^ ti)) {
+            return add_or_xor_gate(st, gk, gm, gi);
+          }
         }
       }
     }
@@ -1426,7 +1428,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   next_inbits[bitp + 1] = -1;
 
   state best;
-  gatenum best_out;
+  gatenum best_out = NO_GATE;
   best.num_gates = 0;
   best.sat_metric = 0;
 
@@ -1493,12 +1495,9 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (fb != NO_GATE) {
         gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
             next_inbits, andnot, false, randomize);
-        if (fb == fc) {
-          mux_out_and = fb;
-        } else {
-          gatenum andg = add_and_gate(&nst_and, fc, bit);
-          mux_out_and = add_xor_gate(&nst_and, fb, andg);
-        }
+        gatenum andg = add_and_gate(&nst_and, fc, bit);
+        mux_out_and = add_xor_gate(&nst_and, fb, andg);
+        assert(mux_out_and == NO_GATE || ttable_equals_mask(target, nst_and.gates[mux_out_and].table, mask));
       }
 
       state nst_or = *st; /* New state using OR multiplexer. */
@@ -1512,12 +1511,9 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       if (fd != NO_GATE) {
         gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
             next_inbits, andnot, false, randomize);
-        if (fd == fe) {
-          mux_out_or = fd;
-        } else {
-          gatenum org = add_or_gate(&nst_or, fe, bit);
-          mux_out_or = add_xor_gate(&nst_or, fd, org);
-        }
+        gatenum org = add_or_gate(&nst_or, fe, bit);
+        mux_out_or = add_xor_gate(&nst_or, fd, org);
+        assert(mux_out_or == NO_GATE || ttable_equals_mask(target, nst_or.gates[mux_out_or].table, mask));
         nst_or.max_gates = st->max_gates;
         nst_or.max_sat_metric = st->max_sat_metric;
       }
@@ -1546,6 +1542,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       }
     }
 
+    assert(best.num_gates == 0 || ttable_equals_mask(target, best.gates[best_out].table, mask));
     if (g_metric == GATES) {
       if (best.num_gates == 0 || nst.num_gates < best.num_gates) {
         best = nst;
@@ -1557,6 +1554,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         best_out = nst_out;
       }
     }
+    assert(best.num_gates == 0 || ttable_equals_mask(target, best.gates[best_out].table, mask));
   }
 
   if (best.num_gates == 0) {
@@ -1784,7 +1782,7 @@ static void save_state(state st) {
   }
 
   char name[40];
-  sprintf(name, "%d-%03d-%03d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
+  sprintf(name, "%d-%03d-%04d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
       state_fingerprint(st));
 
   FILE *fp = fopen(name, "w");
