@@ -20,6 +20,10 @@
 #ifndef __STATE_H__
 #define __STATE_H__
 
+#include <stdbool.h>
+#include <stdint.h>
+#include <x86intrin.h>
+
 #define MAX_GATES 500
 #define NO_GATE ((gatenum)-1)
 #define PRIgatenum PRIu16 /* Used in printf format strings. */
