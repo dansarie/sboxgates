@@ -521,6 +521,7 @@ static void get_nth_combination(int64_t n, int num_gates, int t, gatenum first,
   assert(0);
 }
 
+/* Creates the next combination of t numbers from the set 0, 1, ..., max - 1. */
 static inline void next_combination(gatenum *combination, int t, int max) {
   int i = t - 1;
   while (i >= 0) {
@@ -619,6 +620,7 @@ static bool search_5lut(const state st, const ttable target, const ttable mask,
     func_order[j] = t;
   }
 
+  /* Determine this rank's work. */
   uint64_t search_space_size = n_choose_k(st.num_gates, 5);
   uint64_t worker_space_size = search_space_size / size;
   uint64_t remainder = search_space_size - worker_space_size * size;
@@ -638,6 +640,7 @@ static bool search_5lut(const state st, const ttable target, const ttable mask,
       st.gates[nums[3]].table, st.gates[nums[4]].table};
   gatenum cache_set[3] = {NO_GATE, NO_GATE, NO_GATE};
   ttable cache[256];
+
   memset(ret, 0, sizeof(uint16_t) * 10);
 
   MPI_Request recv_req = MPI_REQUEST_NULL;
@@ -659,6 +662,7 @@ static bool search_5lut(const state st, const ttable target, const ttable mask,
         cache_set[1] = nums[1];
         cache_set[2] = nums[2];
       }
+
       for (uint16_t fo = 0; !quit && fo < 256; fo++) {
         uint8_t func_outer = func_order[fo];
         ttable t_outer = cache[func_outer];
@@ -704,6 +708,7 @@ static bool search_7lut(const state st, const ttable target, const ttable mask,
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+  /* Determine this rank's work. */
   uint64_t search_space_size = n_choose_k(st.num_gates, 7);
   uint64_t worker_space_size = search_space_size / size;
   uint64_t remainder = search_space_size - worker_space_size * size;
@@ -724,7 +729,6 @@ static bool search_7lut(const state st, const ttable target, const ttable mask,
       st.gates[nums[6]].table};
 
   /* Filter out the gate combinations where a 7LUT is possible. */
-
   gatenum *result = malloc(7 * 100000 * sizeof(gatenum));
   assert(result != NULL);
   int p = 0;
@@ -834,6 +838,7 @@ static bool search_7lut(const state st, const ttable target, const ttable mask,
       generate_lut_ttables(td, te, tf, middle_cache);
       middle_cache_set = (uint64_t)d << 32 | (uint64_t)e << 16 | f;
     }
+
     for (uint16_t fo = 0; !quit && fo < 256; fo++) {
       uint8_t func_outer = outer_func_order[fo];
       ttable t_outer = outer_cache[func_outer];
@@ -856,6 +861,7 @@ static bool search_7lut(const state st, const ttable target, const ttable mask,
         ret[7] = e;
         ret[8] = f;
         ret[9] = g;
+
         assert(send_req == MPI_REQUEST_NULL);
         MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
         quit = true;
@@ -983,6 +989,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
        output LUT. */
 
     uint16_t res[10];
+
     memset(res, 0, sizeof(uint16_t) * 10);
     printf("[   0] Search 5.\n");
 
@@ -1001,6 +1008,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       ttable te = st->gates[e].table;
       printf("[   0] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n",
           func_outer, func_inner, a, b, c, d, e);
+
       assert(check_5lut_possible(target, mask, ta, tb, tc, td, te));
       ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
       ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
@@ -1194,7 +1202,6 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         }
       }
     }
-
 
     for (int i = 0; i < st->num_gates; i++) {
       const gatenum gi = gate_order[i];
@@ -2035,5 +2042,6 @@ int main(int argc, char **argv) {
   MPI_Finalize();
   #endif
 
+  MPI_FINALIZE();
   return 0;
 }
