@@ -1,12 +1,32 @@
-/*
- * state.c
- * Copyright (c) 2016-2017 Marcus Dansarie
- */
+/* state.c
 
+   Helper functions for saving and loading files containing logic circuit
+   representations of S-boxes created by sboxgates.
+
+   Copyright (c) 2016-2017 Marcus Dansarie
+
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program. If not, see <http://www.gnu.org/licenses/>. */
+
+#define MSGPACK_FORMAT_VERSION 2
+#include <assert.h>
+#include <limits.h>
 #include <msgpack.h>
 #include <msgpack/fbuffer.h>
-
-#include "sboxgates.h"
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include "state.h"
 
 static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
   pt1 = (pt1 >> 7) | (pt1 << 9);
@@ -20,7 +40,7 @@ static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
 /* Generates a simple fingerprint based on the Speck round function. It is meant to be used for
    creating unique-ish names for the state save file and is not intended to be cryptographically
    secure by any means. */
-uint32_t state_fingerprint(const state st) {
+static uint32_t state_fingerprint(const state st) {
   assert(st.num_gates <= MAX_GATES);
   state fpstate;
   memset(&fpstate, 0, sizeof(state));
@@ -76,7 +96,7 @@ void save_state(state st) {
   }
 
   char name[40];
-  sprintf(name, "%d-%03d-%03d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
+  sprintf(name, "%d-%03d-%04d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
       state_fingerprint(st));
 
   FILE *fp = fopen(name, "w");
@@ -121,6 +141,27 @@ static int unpack_int(msgpack_unpacker *unp, int *ret) {
   *ret = und.data.via.i64;
   msgpack_unpacked_destroy(&und);
   return true;
+}
+
+/* Returns the SAT metric of the specified gate type. Calling this with the LUT
+ * gate type will cause an assertion to fail. */
+int get_sat_metric(gate_type type) {
+  switch (type) {
+    case IN:
+      return 0;
+    case NOT:
+      return 4;
+    case AND:
+    case OR:
+    case ANDNOT:
+      return 7;
+    case XOR:
+      return 12;
+    case LUT:
+    default:
+      assert(0);
+  }
+  return 0;
 }
 
 /* Loads a saved state */
@@ -261,26 +302,12 @@ bool load_state(const char *name, state *return_state) {
 
   /* Calculate SAT metric. */
   for (int i = 0; i < st.num_gates; i++) {
-    switch(st.gates[i].type) {
-      case IN:
-      case NOT:
-        break;
-      case AND:
-      case OR:
-      case ANDNOT:
-        st.sat_metric += 1;
-        break;
-      case XOR:
-        st.sat_metric += 4;
-        break;
-      case LUT:
-        st.sat_metric = 0;
-        goto no_metric;
-      default:
-        assert(0);
+    if (st.gates[i].type == LUT) {
+      st.sat_metric = 0;
+      break;
     }
+    st.sat_metric += get_sat_metric(st.gates[i].type);
   }
-  no_metric:
 
   msgpack_unpacked_destroy(&und);
   msgpack_unpacker_destroy(&unp);
