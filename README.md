@@ -1,6 +1,7 @@
+[![DOI](https://zenodo.org/badge/79294181.svg)](https://zenodo.org/badge/latestdoi/79294181)
+
 # sboxgates
 Program for finding low gate count implementations of S-boxes.
-[![DOI](https://zenodo.org/badge/79294181.svg)](https://zenodo.org/badge/latestdoi/79294181)
 
 The algorithm used is described in [Kwan, Matthew: "Reducing the Gate Count of Bitslice DES."
 IACR Cryptology ePrint Archive 2000 (2000): 51](https://ia.cr/2000/051), with improvements from the
