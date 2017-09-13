@@ -1633,14 +1633,14 @@ void print_digraph(const state st) {
 }
 
 /* Called by print_c_function to get variable names. */
-static bool get_c_variable_name(const state st, const gatenum gate, char *buf) {
+static bool get_c_variable_name(const state st, const gatenum gate, char *buf, bool ptr_out) {
   if (gate < 8) {
     sprintf(buf, "in.b%" PRIgatenum, gate);
     return false;
   }
   for (uint8_t i = 0; i < 8; i++) {
     if (st.outputs[i] == gate) {
-      sprintf(buf, "out%d", i);
+      sprintf(buf, "%sout%d", ptr_out ? "*" : "", i);
       return false;
     }
   }
@@ -1649,40 +1649,122 @@ static bool get_c_variable_name(const state st, const gatenum gate, char *buf) {
 }
 
 /* Converts the given state gate network to a C function and prints it to stdout. */
-static void print_c_function(const state st) {
-  const char TYPE[] = "int ";
-  char buf[10];
-  printf("__device__ __forceinline__ int s0(eightbits in) {\n");
+static bool print_c_function(const state st) {
+  bool cuda = false;
   for (int gate = 8; gate < st.num_gates; gate++) {
-    bool ret = get_c_variable_name(st, gate, buf);
-    printf("  %s%s = ", ret == true ? TYPE : "", buf);
-    get_c_variable_name(st, st.gates[gate].in1, buf);
-    if (st.gates[gate].type == NOT) {
-      printf("~%s;\n", buf);
-      continue;
+    if (st.gates[gate].type == LUT) {
+      cuda = true;
+      break;
     }
-    if (st.gates[gate].type == ANDNOT) {
-      printf("~");
+  }
+
+  int num_outputs = 0;
+  int outp_num = 0;
+  for (int outp = 0; outp < 8; outp++) {
+    if (st.outputs[outp] != NO_GATE) {
+      num_outputs += 1;
+      outp_num = outp;
     }
-    printf("%s ", buf);
-    switch (st.gates[gate].type) {
-      case AND:
-      case ANDNOT:
-        printf("& ");
-        break;
-      case OR:
-        printf("| ");
-        break;
-      case XOR:
-        printf("^ ");
-        break;
-      default:
-        assert(false);
+  }
+  if (num_outputs <= 0) {
+    fprintf(stderr, "Error: no output gates in circuit.\n");
+    return false;
+  }
+  bool ptr_ret = num_outputs > 1;
+
+  #define TYPE_STR "bit_t"
+  const char TYPE[] = TYPE_STR;
+  const char STRUCT_STR[] = "typedef struct {\n"
+                            "  " TYPE_STR " b0;\n"
+                            "  " TYPE_STR " b1;\n"
+                            "  " TYPE_STR " b2;\n"
+                            "  " TYPE_STR " b3;\n"
+                            "  " TYPE_STR " b4;\n"
+                            "  " TYPE_STR " b5;\n"
+                            "  " TYPE_STR " b6;\n"
+                            "  " TYPE_STR " b7;\n"
+                            "} eightbits;\n";
+  if (cuda) {
+    printf("#define LUT(a,b,c,d,e) asm(\"lop3.b32 %%0, %%1, %%2, %%3, \"#e\";\" : \"=r\"(##a): "
+        "\"r\"(##b), \"r\"(##c), \"r\"(##d));\n");
+    printf("typedef uint %s;\n", TYPE);
+    printf(STRUCT_STR);
+    if (num_outputs > 1) {
+      printf("__device__ __forceinline__ void s(eightbits in");
+      for (int outp = 0; outp < 8; outp++) {
+        if (st.outputs[outp] != NO_GATE) {
+          printf(", %s *out%d", TYPE, outp);
+        }
+      }
+      printf(") {\n");
+    } else {
+      printf("__device__ __forceinline__ %s s%d(eightbits in) {\n", TYPE, outp_num);
     }
-    get_c_variable_name(st, st.gates[gate].in2, buf);
-    printf("%s;\n", buf);
+  } else {
+    printf("typedef __m256i %s;\n", TYPE);
+    printf(STRUCT_STR);
+    if (num_outputs > 1) {
+      printf("static inline void s(eightbits in");
+      for (int outp = 0; outp < 8; outp++) {
+        if (st.outputs[outp] != NO_GATE) {
+          printf(", %s *out%d", TYPE, outp);
+        }
+      }
+      printf(") {\n");
+    } else {
+      printf("static inline %s s%d(eightbits in) {\n", TYPE, outp_num);
+    }
+  }
+  char buf[10];
+  for (int gate = 8; gate < st.num_gates; gate++) {
+    bool ret = get_c_variable_name(st, gate, buf, ptr_ret);
+    if (ret != true) {
+      printf("  %s = ", buf);
+    } else {
+      printf("  %s %s = ", TYPE, buf);
+    }
+    if (st.gates[gate].type == LUT) {
+      printf("LUT(%s, ", buf);
+      get_c_variable_name(st, st.gates[gate].in1, buf, ptr_ret);
+      printf("%s, ", buf);
+      get_c_variable_name(st, st.gates[gate].in2, buf, ptr_ret);
+      printf("%s, ", buf);
+      get_c_variable_name(st, st.gates[gate].in3, buf, ptr_ret);
+      printf("%s, 0x%02x);\n", buf, st.gates[gate].function);
+    } else {
+      get_c_variable_name(st, st.gates[gate].in1, buf, ptr_ret);
+      if (st.gates[gate].type == NOT) {
+        printf("~%s;\n", buf);
+        continue;
+      }
+      if (st.gates[gate].type == ANDNOT) {
+        printf("~");
+      }
+      printf("%s ", buf);
+      switch (st.gates[gate].type) {
+        case AND:
+        case ANDNOT:
+          printf("& ");
+          break;
+        case OR:
+          printf("| ");
+          break;
+        case XOR:
+          printf("^ ");
+          break;
+        default:
+          assert(false);
+      }
+      get_c_variable_name(st, st.gates[gate].in2, buf, ptr_ret);
+      printf("%s;\n", buf);
+    }
+    if (!ret && num_outputs == 1) {
+      get_c_variable_name(st, gate, buf, ptr_ret);
+      printf("  return %s;\n", buf);
+    }
   }
   printf("}\n");
+  return true;
 }
 
 void generate_graph_one_output(const bool andnot, const bool lut, const bool randomize,
@@ -1969,14 +2051,10 @@ int main(int argc, char **argv) {
       return 1;
     }
     if (output_c) {
-      for (int i = 0; i < st.num_gates; i++) {
-        if (st.gates[i].type == LUT) {
-          fprintf(stderr, "C output of graphs containing LUTs is not supported.\n");
-          MPI_FINALIZE();
-          return 1;
-        }
+      if (!print_c_function(st)) {
+        MPI_FINALIZE();
+        return 1;
       }
-      print_c_function(st);
     } else {
       print_digraph(st);
     }
