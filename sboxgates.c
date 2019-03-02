@@ -5,7 +5,7 @@
    IACR Cryptology ePrint Archive 2000 (2000): 51. Improvements from
    SBOXDiscovery (https://github.com/DeepLearningJohnDoe/SBOXDiscovery) have been added.
 
-   Copyright (c) 2016-2017 Marcus Dansarie
+   Copyright (c) 2016-2017, 2019 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -540,6 +540,7 @@ static inline void next_combination(gatenum *combination, int t, int max) {
   }
 }
 
+/* Called by search_5lut and search_7lut to fetch the result of a search from the workers. */
 static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_req,
     MPI_Request *send_req) {
 
@@ -547,57 +548,73 @@ static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_re
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-  MPI_Request reqs[2] = {*recv_req, MPI_REQUEST_NULL};
-  MPI_Ibarrier(MPI_COMM_WORLD, &reqs[1]);
+  int flag;
+  MPI_Request *quit_requests = NULL;
   if (rank == 0) {
-    if (*recv_req == MPI_REQUEST_NULL) {
+    /* If we've received a message, the search was successful. In that case, tell all workers to
+       quit the search. */
+    if (*quit_msg >= 0) {
+      quit_requests = malloc(sizeof(MPI_Request) * (size - 1));
+      assert(quit_requests != NULL);
       for (int i = 1; i < size; i++) {
-        MPI_Send(quit_msg, 1, MPI_INT, i, 2, MPI_COMM_WORLD);
+        MPI_Isend(quit_msg, 1, MPI_INT, i, 2, MPI_COMM_WORLD, &quit_requests[i - 1]);
       }
     }
-    int index;
-    MPI_Waitany(2, reqs, &index, MPI_STATUSES_IGNORE);
-    if (index == 0) { /* Received 'found' message. */
-      for (int i = 1; i < size; i++) {
-        MPI_Send(quit_msg, 1, MPI_INT, i, 2, MPI_COMM_WORLD);
-      }
-      MPI_Wait(&reqs[1], MPI_STATUS_IGNORE);
-    } else if (*quit_msg == -1) { /* No worker found a LUT. */
-      for (int i = 1; i < size; i++) {
-        MPI_Send(quit_msg, 1, MPI_INT, i, 2, MPI_COMM_WORLD);
-      }
-      MPI_Cancel(&reqs[0]);
-      MPI_Wait(&reqs[0], MPI_STATUS_IGNORE);
-    }
-  } else {
-    MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE);
   }
 
-  *recv_req = reqs[0];
+  /* Wait for all workers before continuing. */
+  MPI_Barrier(MPI_COMM_WORLD);
 
-  if (*quit_msg == -1) {
+  /* Cancel any non-completed requests. */
+  if (*recv_req != MPI_REQUEST_NULL) {
+    MPI_Test(recv_req, &flag, MPI_STATUS_IGNORE);
+    if (!flag) {
+      MPI_Cancel(recv_req);
+      MPI_Wait(recv_req, MPI_STATUS_IGNORE);
+    }
+  }
+
+  if (*send_req != MPI_REQUEST_NULL) {
+    MPI_Test(send_req, &flag, MPI_STATUS_IGNORE);
+    if (!flag) {
+      MPI_Cancel(send_req);
+      MPI_Wait(send_req, MPI_STATUS_IGNORE);
+    }
+  }
+
+  if (quit_requests != NULL) {
+    for (int i = 0; i < (size - 1); i++) {
+      MPI_Test(&quit_requests[i], &flag, MPI_STATUS_IGNORE);
+      if (!flag) {
+        MPI_Cancel(&quit_requests[i]);
+      }
+    }
+    MPI_Waitall(size - 1, quit_requests, MPI_STATUSES_IGNORE);
+    free(quit_requests);
+  }
+
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  /* If more than one worker found a match, there may be extra messages waiting. Receive and
+     dispose of those. */
+  if (rank == 0) {
+    do {
+      MPI_Iprobe(MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, &flag, MPI_STATUS_IGNORE);
+      if (flag) {
+        int foo;
+        MPI_Recv(&foo, 1, MPI_INT, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      }
+    } while (flag);
+  }
+
+  /* Broadcast rank of worker that will broadcast search result. This will be -1 if the search
+       was unsuccessful. */
+  MPI_Bcast(quit_msg, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  if (*quit_msg < 0) {
     assert(*send_req == MPI_REQUEST_NULL);
-    MPI_Barrier(MPI_COMM_WORLD);
     return false;
   }
-
   MPI_Bcast(ret, 10, MPI_SHORT, *quit_msg, MPI_COMM_WORLD);
-
-  if (*send_req == MPI_REQUEST_NULL) {
-    MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, send_req);
-  }
-
-  if (rank == 0) {
-    for (int i = 0; i < size; i++) {
-      if (i == *quit_msg) {
-        continue;
-      }
-      int buf;
-      MPI_Recv(&buf, 1, MPI_INT, i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    }
-  }
-  MPI_Wait(send_req, MPI_STATUS_IGNORE);
-  MPI_Barrier(MPI_COMM_WORLD);
   return true;
 }
 
@@ -684,8 +701,14 @@ static bool search_5lut(const state st, const ttable target, const ttable mask,
         ret[8] = 0;
         ret[9] = 0;
         assert(send_req == MPI_REQUEST_NULL);
-        MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+        if (rank == 0) {
+          quit_msg = 0;
+        } else {
+          MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+        }
         quit = true;
+        printf("[% 4d] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n", rank, func_outer,
+            func_inner, nums[0], nums[1], nums[2], nums[3], nums[4]);
       }
     }
     if (!quit) {
@@ -862,10 +885,15 @@ static bool search_7lut(const state st, const ttable target, const ttable mask,
         ret[7] = e;
         ret[8] = f;
         ret[9] = g;
-
         assert(send_req == MPI_REQUEST_NULL);
-        MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+        if (rank == 0) {
+          quit_msg = 0;
+        } else {
+          MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+        }
         quit = true;
+        printf("[% 4d] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n", rank, func_outer,
+            func_middle, func_inner, a, b, c, d, e, f, g);
       }
     }
     if (!quit) {
