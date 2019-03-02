@@ -34,7 +34,7 @@ $ ./build.sh
 
 The `-h` command line argument will display a brief list of command line options.
 
-Generate a logic circuit representation or the S-box:
+Generate a logic circuit representation of the S-box:
 ```console
 $ ./sboxgates
 ```
