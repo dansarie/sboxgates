@@ -225,6 +225,7 @@ bool get_lut_function(const ttable in1, const ttable in2, const ttable in3, cons
    input gate numbers. */
 bool search_5lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
   assert(ret != NULL);
+  assert(st.num_gates >= 5);
 
   int rank, size;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -335,6 +336,7 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
    and ret[3] - ret[9] the seven input gate numbers. */
 bool search_7lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
   assert(ret != NULL);
+  assert(st.num_gates >= 7);
 
   int rank, size;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -517,10 +519,10 @@ bool search_7lut(const state st, const ttable target, const ttable mask, uint16_
 }
 
 /* Generates the nth combination of num_gates choose t gates numbered first, first + 1, ...
-   Return combination in ret[t]. */
+   Return combination in ret. */
 static void get_nth_combination(int64_t n, int num_gates, int t, gatenum first, gatenum *ret) {
   assert(ret != NULL);
-  assert(t < num_gates);
+  assert(t <= num_gates);
 
   if (t == 0) {
     return;

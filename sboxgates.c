@@ -234,6 +234,30 @@ static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2,
   return add_xor_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
 }
 
+/* Returns the number of input gates in the state. */
+int get_num_inputs(const state *st) {
+  int inputs = 0;
+  for (int i = 0; st->gates[i].type == IN && i < st->num_gates; i++) {
+    inputs += 1;
+  }
+  return inputs;
+}
+
+/* Returns the number of outputs in the current target S-box. */
+static int get_num_outputs() {
+  static int outputs = -1;
+  if (outputs != -1) {
+    return outputs;
+  }
+  for (int i = 7; i >= 0; i--) {
+    if (!_mm256_testz_si256(g_target[i], g_target[i])) {
+      outputs = i + 1;
+      return outputs;
+    }
+  }
+  assert(0);
+}
+
 /* Generates pseudorandom 64 bit strings. Used for randomizing the search process. */
 uint64_t xorshift1024() {
   static bool init = false;
@@ -371,7 +395,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     memset(res, 0, sizeof(uint16_t) * 10);
     printf("[   0] Search 5.\n");
 
-    if (search_5lut(work.st, work.target, work.mask, res)) {
+    if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, res)) {
       uint8_t func_outer = (uint8_t)res[0];
       uint8_t func_inner = (uint8_t)res[1];
       gatenum a = res[2];
@@ -397,7 +421,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     }
 
     printf("[   0] Search 7.\n");
-    if (search_7lut(work.st, work.target, work.mask, res)) {
+    if (work.st.num_gates >= 7 && search_7lut(work.st, work.target, work.mask, res)) {
       uint8_t func_outer = (uint8_t)res[0];
       uint8_t func_middle = (uint8_t)res[1];
       uint8_t func_inner = (uint8_t)res[2];
@@ -427,7 +451,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           add_lut(st, func_middle, t_middle, d, e, f), g);
     }
 
-    printf("[   0] No LUTs found. Num gates: %d\n", st->num_gates - 8);
+    printf("[   0] No LUTs found. Num gates: %d\n", st->num_gates - get_num_inputs(st));
   } else {
     /* 4. Look at all combinations of two or three gates in the circuit. If they can be combined
        with two gates to produce the desired map, add the gates, and return the ID of the one that
@@ -668,7 +692,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   best.sat_metric = 0;
 
   /* Try all input bit orders. */
-  for (int bit = 0; bit < 8; bit++) {
+  for (int bit = 0; bit < get_num_inputs(st); bit++) {
     bool skip = false;
     for (int i = 0; i < bitp; i++) {
       if (inbits[i] == bit) {
@@ -817,10 +841,12 @@ static void mpi_worker() {
       return;
     }
 
-    if (search_5lut(work.st, work.target, work.mask, res)) {
+    if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, res)) {
       continue;
     }
-    search_7lut(work.st, work.target, work.mask, res);
+    if (work.st.num_gates >= 7) {
+      search_7lut(work.st, work.target, work.mask, res);
+    }
   }
 }
 
@@ -844,24 +870,39 @@ static ttable generate_target(uint8_t bit, bool sbox) {
   return _mm256_loadu_si256((ttable*)vec);
 }
 
+static ttable generate_mask(int num_inputs) {
+  uint64_t mask_vec[] = {0xFFFFFFFFFFFFFFFFUL, 0xFFFFFFFFFFFFFFFFUL,
+                         0xFFFFFFFFFFFFFFFFUL, 0xFFFFFFFFFFFFFFFFUL};
+  if (num_inputs < 8) {
+    mask_vec[2] = mask_vec[3] = 0;
+  }
+  if (num_inputs < 7) {
+    mask_vec[1] = 0;
+  }
+  if (num_inputs < 6) {
+    mask_vec[0] = (1L << (1 << num_inputs)) - 1;
+  }
+  return _mm256_loadu_si256((ttable*)mask_vec);
+}
+
 void generate_graph_one_output(const bool andnot, const bool lut, const bool randomize,
     const int iterations, const int output, state st) {
   assert(iterations > 0);
-  assert(output >= 0 && output <= 7);
+  assert(output >= 0 && output <= get_num_outputs() - 1);
   printf("Generating graphs for output %d...\n", output);
   for (int iter = 0; iter < iterations; iter++) {
     state nst = st;
 
     int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
-    const ttable mask = ~_mm256_setzero_si256();
+    const ttable mask = generate_mask(get_num_inputs(&st));
     nst.outputs[output] = create_circuit(&nst, g_target[output], mask, bits, andnot, lut,
         randomize);
     if (nst.outputs[output] == NO_GATE) {
       printf("(%d/%d): Not found.\n", iter + 1, iterations);
       continue;
     }
-    printf("(%d/%d): %d gates. SAT metric: %d\n", iter + 1, iterations, nst.num_gates - 8,
-        nst.sat_metric);
+    printf("(%d/%d): %d gates. SAT metric: %d\n", iter + 1, iterations,
+        nst.num_gates - get_num_inputs(&nst), nst.sat_metric);
     save_state(nst);
     if (g_metric == GATES) {
       if (nst.num_gates < st.max_gates) {
@@ -895,10 +936,11 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
   /* Build the gate network one output at a time. After every added output, select the gate network
      or network with the least amount of gates and add another. */
   int num_outputs;
-  while ((num_outputs = count_state_outputs(start_states[0])) < 8) {
+  while ((num_outputs = count_state_outputs(start_states[0])) < get_num_outputs()) {
     gatenum max_gates = MAX_GATES;
     int max_sat_metric = INT_MAX;
     state out_states[20];
+    memset(out_states, 0, sizeof(state) * 20);
     int num_out_states = 0;
 
     for (int iter = 0; iter < iterations; iter++) {
@@ -909,7 +951,7 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
         start_states[current_state].max_sat_metric = max_sat_metric;
 
         /* Add all outputs not already present to see which resulting network is the smallest. */
-        for (uint8_t output = 0; output < 8; output++) {
+        for (uint8_t output = 0; output < get_num_outputs(); output++) {
           if (start_states[current_state].outputs[output] != NO_GATE) {
             printf("Skipping output %d.\n", output);
             continue;
@@ -922,14 +964,15 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
           } else {
             st.max_sat_metric = max_sat_metric;
           }
-          const ttable mask = ~_mm256_setzero_si256();
+
+          const ttable mask = generate_mask(get_num_inputs(&st));
           st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot, lut,
               randomize);
           if (st.outputs[output] == NO_GATE) {
             printf("No solution for output %d.\n", output);
             continue;
           }
-          assert(ttable_equals(g_target[output], st.gates[st.outputs[output]].table));
+          assert(ttable_equals_mask(g_target[output], st.gates[st.outputs[output]].table, mask));
           save_state(st);
 
           if (g_metric == GATES) {
@@ -962,7 +1005,7 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
     }
     if (g_metric == GATES) {
       printf("Found %d state%s with %d gates.\n", num_out_states,
-          num_out_states == 1 ? "" : "s", max_gates - 8);
+          num_out_states == 1 ? "" : "s", max_gates - get_num_inputs(&out_states[0]));
     } else {
       printf("Found %d state%s with SAT metric %d.\n", num_out_states,
           num_out_states == 1 ? "" : "s", max_sat_metric);
@@ -1149,9 +1192,11 @@ int main(int argc, char **argv) {
   }
 
   uint8_t target_sbox[256];
+  memset(target_sbox, 0, sizeof(uint8_t) * 256);
   int sbox_inp = 0;
   int ret;
   uint32_t input;
+  uint32_t num_outputs = 0;
   FILE *sboxfp = fopen(sboxfname, "r");
   if (sboxfp == NULL) {
     fprintf(stderr, "Error when opening target S-box file.\n");
@@ -1160,13 +1205,16 @@ int main(int argc, char **argv) {
   }
   while ((ret = fscanf(sboxfp, " %x", &input)) > 0 && ret != EOF && sbox_inp < 256 && input < 256) {
     target_sbox[sbox_inp++] = input;
+    num_outputs |= input;
   }
   fclose(sboxfp);
-  if (sbox_inp != 256) {
+  if (__builtin_popcount(sbox_inp) != 1) {
     fprintf(stderr, "Bad number of items in target S-box.\n");
     stop_workers();
     return 1;
   }
+  uint32_t num_inputs = 31 - __builtin_clz(sbox_inp);
+  num_outputs = 32 - __builtin_clz(num_outputs);
 
   if (permute == 0) {
     memcpy(g_sbox_enc, target_sbox, 256 * sizeof(uint8_t));
@@ -1186,14 +1234,16 @@ int main(int argc, char **argv) {
     st.max_sat_metric = INT_MAX;
     st.sat_metric = 0;
     st.max_gates = MAX_GATES;
-    st.num_gates = 8;
-    for (uint8_t i = 0; i < 8; i++) {
+    st.num_gates = num_inputs;
+    for (int i = 0; i < num_inputs; i++) {
       st.gates[i].type = IN;
       st.gates[i].table = generate_target(i, false);
       st.gates[i].in1 = NO_GATE;
       st.gates[i].in2 = NO_GATE;
       st.gates[i].in3 = NO_GATE;
       st.gates[i].function = 0;
+    }
+    for (int i = 0; i < 8; i++) {
       st.outputs[i] = NO_GATE;
     }
   } else if (!load_state(gfname, &st)) {

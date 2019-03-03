@@ -23,6 +23,9 @@
 /* Performs a masked test for equality. Only bits set to 1 in the mask will be tested. */
 bool ttable_equals_mask(const ttable in1, const ttable in2, const ttable mask);
 
+/* Returns the number of input gates in the state. */
+int get_num_inputs(const state *st);
+
 /* Generates pseudorandom 64 bit strings. Used for randomizing the search process. */
 uint64_t xorshift1024();
 

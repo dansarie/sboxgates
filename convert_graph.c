@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "convert_graph.h"
+#include "sboxgates.h"
 
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
@@ -78,7 +79,7 @@ void print_digraph(const state st) {
     }
     printf("  gt%d [label=\"%s\"];\n", gt, gatename);
   }
-  for (int gt = 8; gt < st.num_gates; gt++) {
+  for (int gt = get_num_inputs(&st); gt < st.num_gates; gt++) {
     if (st.gates[gt].in1 != NO_GATE) {
       printf("  gt%" PRIgatenum " -> gt%d;\n", st.gates[gt].in1, gt);
     }
@@ -103,7 +104,7 @@ static bool get_c_variable_name(const state st, const gatenum gate, char *buf, b
     sprintf(buf, "in.b%" PRIgatenum, gate);
     return false;
   }
-  for (uint8_t i = 0; i < 8; i++) {
+  for (uint8_t i = 0; i < get_num_inputs(&st); i++) {
     if (st.outputs[i] == gate) {
       sprintf(buf, "%sout%d", ptr_out ? "*" : "", i);
       return false;
@@ -116,7 +117,7 @@ static bool get_c_variable_name(const state st, const gatenum gate, char *buf, b
 /* Converts a gate network to a C function and prints it to stdout. */
 bool print_c_function(const state st) {
   bool cuda = false;
-  for (int gate = 8; gate < st.num_gates; gate++) {
+  for (int gate = get_num_inputs(&st); gate < st.num_gates; gate++) {
     if (st.gates[gate].type == LUT) {
       cuda = true;
       break;
@@ -125,7 +126,7 @@ bool print_c_function(const state st) {
 
   int num_outputs = 0;
   int outp_num = 0;
-  for (int outp = 0; outp < 8; outp++) {
+  for (int outp = 0; outp < get_num_inputs(&st); outp++) {
     if (st.outputs[outp] != NO_GATE) {
       num_outputs += 1;
       outp_num = outp;
@@ -170,7 +171,7 @@ bool print_c_function(const state st) {
     printf(STRUCT_STR);
     if (num_outputs > 1) {
       printf("static inline void s(eightbits in");
-      for (int outp = 0; outp < 8; outp++) {
+      for (int outp = 0; outp < get_num_inputs(&st); outp++) {
         if (st.outputs[outp] != NO_GATE) {
           printf(", %s *out%d", TYPE, outp);
         }
@@ -181,7 +182,7 @@ bool print_c_function(const state st) {
     }
   }
   char buf[10];
-  for (int gate = 8; gate < st.num_gates; gate++) {
+  for (int gate = get_num_inputs(&st); gate < st.num_gates; gate++) {
     bool ret = get_c_variable_name(st, gate, buf, ptr_ret);
     if (ret != true) {
       printf("  %s = ", buf);

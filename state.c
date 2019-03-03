@@ -26,6 +26,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include "sboxgates.h"
 #include "state.h"
 
 static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
@@ -96,8 +97,8 @@ void save_state(state st) {
   }
 
   char name[40];
-  assert(snprintf(name, 40, "%d-%03d-%04d-%s-%08x.state", num_outputs, st.num_gates - 8,
-    st.sat_metric, out, state_fingerprint(st)) < 40);
+  assert(snprintf(name, 40, "%d-%03d-%04d-%s-%08x.state", num_outputs,
+    st.num_gates - get_num_inputs(&st), st.sat_metric, out, state_fingerprint(st)) < 40);
 
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
