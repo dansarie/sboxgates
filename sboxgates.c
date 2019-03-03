@@ -128,6 +128,8 @@ static inline gatenum add_gate(state *st, gate_type type, ttable table, gatenum 
   return st->num_gates - 1;
 }
 
+/* Adds a three input LUT with function func to the state st. Returns the gate number of the
+   added LUT. */
 static inline gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid1, gatenum gid2,
     gatenum gid3) {
   if (gid1 == NO_GATE || gid2 == NO_GATE || gid3 == NO_GATE || st->num_gates > st->max_gates) {
@@ -277,36 +279,39 @@ static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2,
   return add_xor_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
 }
 
+/* Calculates the truth table of a LUT given its function and three input truth tables. */
 static inline ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
     const ttable in3) {
   ttable ret = _mm256_setzero_si256();
-  if ((function & 1) != 0) {
+  if (function & 1) {
     ret |= ~in1 & ~in2 & ~in3;
   }
-  if ((function & 2) != 0) {
+  if (function & 2) {
     ret |= ~in1 & ~in2 & in3;
   }
-  if ((function & 4) != 0) {
+  if (function & 4) {
     ret |= ~in1 & in2 & ~in3;
   }
-  if ((function & 8) != 0) {
+  if (function & 8) {
     ret |= ~in1 & in2 & in3;
   }
-  if ((function & 16) != 0) {
+  if (function & 16) {
     ret |= in1 & ~in2 & ~in3;
   }
-  if ((function & 32) != 0) {
+  if (function & 32) {
     ret |= in1 & ~in2 & in3;
   }
-  if ((function & 64) != 0) {
+  if (function & 64) {
     ret |= in1 & in2 & ~in3;
   }
-  if ((function & 128) != 0) {
+  if (function & 128) {
     ret |= in1 & in2 & in3;
   }
   return ret;
 }
 
+/* Generates all possible truth tables for a LUT with the given three input truth tables. Used for
+   caching in the search functions. */
 static inline void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3,
     ttable *out) {
   for (int func = 0; func < 256; func++) {
@@ -314,6 +319,7 @@ static inline void generate_lut_ttables(const ttable in1, const ttable in2, cons
   }
 }
 
+/* Generates pseudorandom 64 bit strings. Used for randomizing the search process. */
 static inline uint64_t xorshift1024() {
   static bool init = false;
   static uint64_t rand[16];
@@ -338,6 +344,9 @@ static inline uint64_t xorshift1024() {
   return rand[p] * 1181783497276652981U;
 }
 
+/* Returns a LUT function func with the three input truth tables with an output truth table matching
+   target in the positions where mask is set. Returns true on success and false if no function that
+   can satisfy the target truth table exists. */
 static inline bool get_lut_function(const ttable in1, const ttable in2, const ttable in3,
     const ttable target, const ttable mask, const bool randomize, uint8_t *func) {
   *func = 0;
@@ -382,6 +391,8 @@ static inline bool get_lut_function(const ttable in1, const ttable in2, const tt
   return true;
 }
 
+/* Returns true if it is possible to generate a LUT with the three input truth tables and an output
+   truth table matching target in the positions where mask is set. */
 static inline bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1,
     const ttable t2, const ttable t3) {
   ttable match = _mm256_setzero_si256();
@@ -406,6 +417,8 @@ static inline bool check_3lut_possible(const ttable target, const ttable mask, c
   return ttable_equals_mask(target, match, mask);
 }
 
+/* Returns true if it is possible to generate a LUT with the five input truth tables and an output
+   truth table matching target in the positions where mask is set. */
 static inline bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1,
     const ttable t2, const ttable t3, const ttable t4, const ttable t5) {
   ttable match = _mm256_setzero_si256();
@@ -438,6 +451,8 @@ static inline bool check_5lut_possible(const ttable target, const ttable mask, c
   return ttable_equals_mask(target, match, mask);
 }
 
+/* Returns true if it is possible to generate a LUT with the seven input truth tables and an output
+   truth table matching target in the positions where mask is set. */
 static inline bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1,
     const ttable t2, const ttable t3, const ttable t4, const ttable t5, const ttable t6,
     const ttable t7) {
@@ -480,6 +495,7 @@ static inline bool check_7lut_possible(const ttable target, const ttable mask, c
 }
 
 #ifdef USE_MPI
+/* Calculates the binomial coefficient (n, k). */
 static inline int64_t n_choose_k(int n, int k) {
   assert(n > 0);
   assert(k >= 0);
@@ -618,6 +634,11 @@ static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_re
   return true;
 }
 
+/* Search for a combination of five outputs in the graph that can be connected with a 5-input LUT
+   to create an output truth table that matches target in the positions where mask is set. Returns
+   true on success. In that case the result is returned in the 7 position array ret: ret[0]
+   contains the outer LUT function, ret[1] the inner LUT function, and ret[2] - ret[6] the five
+   input gate numbers. */
 static bool search_5lut(const state st, const ttable target, const ttable mask,
     uint16_t *ret) {
   assert(ret != NULL);
@@ -724,6 +745,11 @@ static bool search_5lut(const state st, const ttable target, const ttable mask,
   return get_search_result(ret, &quit_msg, &recv_req, &send_req);
 }
 
+/* Search for a combination of seven outputs in the graph that can be connected with a 7-input LUT
+   to create an output truth table that matches target in the positions where mask is set. Returns
+   true on success. In that case the result is returned in the 10 position array ret: ret[0]
+   contains the outer LUT function, ret[1] the middle LUT function, ret[2] the inner LUT function,
+   and ret[3] - ret[9] the seven input gate numbers. */
 static bool search_7lut(const state st, const ttable target, const ttable mask,
     uint16_t *ret) {
   assert(ret != NULL);
@@ -753,7 +779,7 @@ static bool search_7lut(const state st, const ttable target, const ttable mask,
       st.gates[nums[6]].table};
 
   /* Filter out the gate combinations where a 7LUT is possible. */
-  gatenum *result = malloc(7 * 100000 * sizeof(gatenum));
+  gatenum *result = malloc(sizeof(gatenum) * 7 * 100000);
   assert(result != NULL);
   int p = 0;
   for (uint64_t i = start; i < stop; i++) {
@@ -785,7 +811,7 @@ static bool search_7lut(const state st, const ttable target, const ttable mask,
     offsets[i] = offsets[i - 1] + rank_nums[i - 1];
   }
 
-  gatenum *lut_list = malloc(tsize * sizeof(gatenum));
+  gatenum *lut_list = malloc(sizeof(gatenum) * tsize);
   assert(lut_list != NULL);
 
   /* Get all hits. */
@@ -1570,6 +1596,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
 #ifdef USE_MPI
 
+/* All MPI ranks except rank 0 will call this function and wait for work units. */
 static void mpi_worker() {
   int rank, size;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
