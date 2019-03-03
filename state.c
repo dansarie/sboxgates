@@ -96,8 +96,8 @@ void save_state(state st) {
   }
 
   char name[40];
-  sprintf(name, "%d-%03d-%04d-%s-%08x.state", num_outputs, st.num_gates - 8, st.sat_metric, out,
-      state_fingerprint(st));
+  assert(snprintf(name, 40, "%d-%03d-%04d-%s-%08x.state", num_outputs, st.num_gates - 8,
+    st.sat_metric, out, state_fingerprint(st)) < 40);
 
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
