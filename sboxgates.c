@@ -1145,12 +1145,10 @@ int main(int argc, char **argv) {
     g_target[i] = generate_target(i, true);
   }
 
-  if (lut_graph) {
-    if (rank != 0) {
-      mpi_worker();
-      MPI_Finalize();
-      return 0;
-    }
+  if (rank != 0) {
+    mpi_worker();
+    MPI_Finalize();
+    return 0;
   }
 
   state st;
