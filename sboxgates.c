@@ -1497,7 +1497,8 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
             next_inbits, andnot, false, randomize);
         gatenum andg = add_and_gate(&nst_and, fc, bit);
         mux_out_and = add_xor_gate(&nst_and, fb, andg);
-        assert(mux_out_and == NO_GATE || ttable_equals_mask(target, nst_and.gates[mux_out_and].table, mask));
+        assert(mux_out_and == NO_GATE ||
+            ttable_equals_mask(target, nst_and.gates[mux_out_and].table, mask));
       }
 
       state nst_or = *st; /* New state using OR multiplexer. */
@@ -1513,7 +1514,8 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
             next_inbits, andnot, false, randomize);
         gatenum org = add_or_gate(&nst_or, fe, bit);
         mux_out_or = add_xor_gate(&nst_or, fd, org);
-        assert(mux_out_or == NO_GATE || ttable_equals_mask(target, nst_or.gates[mux_out_or].table, mask));
+        assert(mux_out_or == NO_GATE ||
+            ttable_equals_mask(target, nst_or.gates[mux_out_or].table, mask));
         nst_or.max_gates = st->max_gates;
         nst_or.max_sat_metric = st->max_sat_metric;
       }
