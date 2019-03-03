@@ -894,6 +894,16 @@ void generate_graph_one_output(const bool andnot, const bool lut, const bool ran
   }
 }
 
+static inline int count_state_outputs(state st) {
+  int num_outputs = 0;
+  for (int i = 0; i < 8; i++) {
+    if (st.outputs[i] != NO_GATE) {
+      num_outputs += 1;
+    }
+  }
+  return num_outputs;
+}
+
 /* Called by main to generate a graph. */
 void generate_graph(const bool andnot, const bool lut, const bool randomize, const int iterations,
     const state st) {
@@ -903,25 +913,13 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
 
   /* Build the gate network one output at a time. After every added output, select the gate network
      or network with the least amount of gates and add another. */
-  while (1) {
+  int num_outputs;
+  while ((num_outputs = count_state_outputs(start_states[0])) < 8) {
     gatenum max_gates = MAX_GATES;
     int max_sat_metric = INT_MAX;
     state out_states[20];
     int num_out_states = 0;
 
-    /* Count the outputs already present in the first of the start states. All start states will
-       have the same number of outputs. */
-    uint8_t num_outputs = 0;
-    for (uint8_t i = 0; i < 8; i++) {
-      if (start_states[0].outputs[i] != NO_GATE) {
-        num_outputs += 1;
-      }
-    }
-    if (num_outputs >= 8) {
-      /* If the input gate network has eight outputs, there is nothing more to do. */
-      printf("Done.\n");
-      break;
-    }
     for (int iter = 0; iter < iterations; iter++) {
       printf("Generating circuits with %d output%s. (%d/%d)\n", num_outputs + 1,
           num_outputs == 0 ? "" : "s", iter + 1, iterations);
