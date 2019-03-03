@@ -1167,10 +1167,6 @@ int main(int argc, char **argv) {
     stop_workers();
     return 1;
   }
-  for (int i = 0; i < 256; i++) {
-    printf("%02x ", target_sbox[i]);
-  }
-  printf("\n");
 
   if (permute == 0) {
     memcpy(g_sbox_enc, target_sbox, 256 * sizeof(uint8_t));
