@@ -17,6 +17,9 @@
    You should have received a copy of the GNU General Public License
    along with this program. If not, see <http://www.gnu.org/licenses/>. */
 
+#ifndef __CONVERT_GRAPH_H__
+#define __CONVERT_GRAPH_H__
+
 #include "state.h"
 
 /* Prints a truth table to the console. Used for debugging. */
@@ -27,3 +30,5 @@ void print_digraph(const state st);
 
 /* Converts a gate network to a C function and prints it to stdout. */
 bool print_c_function(const state st);
+
+#endif /* __CONVERT_GRAPH_H__ */
