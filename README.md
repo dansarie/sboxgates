@@ -19,9 +19,6 @@ use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 
 ## Build
 
-Edit [sboxgates.c](sboxgates.c) and change the constant array `g_target_sbox` to the lookup table
-for the S-box you wish to generate logic circuits for.
-
 ```
 sudo apt-get install libmsgpack-dev libopenmpi-dev openmpi-bin
 ./build.sh
@@ -31,14 +28,14 @@ sudo apt-get install libmsgpack-dev libopenmpi-dev openmpi-bin
 
 The `-h` command line argument will display a brief list of command line options.
 
-Generate a logic circuit representation of the S-box:
+Generate a logic circuit representation of the Rijndael S-box:
 ```
-./sboxgates
+./sboxgates -b sboxes/rijndael.txt
 ```
 
-Generate a LUT circuit for output bit 0 of the S-box (using MPI):
+Generate a LUT circuit for output bit 0 of the Rijdael S-box:
 ```
-mpirun ./sboxgates -l -o 0
+mpirun ./sboxgates -l -o 0 -b sboxes/rijndael.txt
 ```
 
 Visualize a generated circuit with Graphwiz:
