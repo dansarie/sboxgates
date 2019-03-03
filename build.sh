@@ -1,3 +1,3 @@
 #!/bin/sh
 
-gcc -Ofast -march=native sboxgates.c state.c convert_graph.c -Wall -Wpedantic -o sboxgates -lmsgpackc
+mpicc -Ofast -march=native convert_graph.c lut.c sboxgates.c state.c  -Wall -Wpedantic -o sboxgates -lmsgpackc

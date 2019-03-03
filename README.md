@@ -13,6 +13,7 @@ use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 
 ## Dependencies
 
+* MPI
 * [msgpack](https://github.com/msgpack/msgpack-c)
 * [Graphviz](https://github.com/ellson/graphviz) (for generating visual representations)
 
@@ -21,14 +22,9 @@ use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 Edit [sboxgates.c](sboxgates.c) and change the constant array `g_target_sbox` to the lookup table
 for the S-box you wish to generate logic circuits for.
 
-Compile with MPI (highly recommended when building LUT networks):
-```console
-$ ./build-mpi.sh
 ```
-
-Compile without MPI:
-```console
-$ ./build.sh
+sudo apt-get install libmsgpack-dev libopenmpi-dev openmpi-bin
+./build.sh
 ```
 
 ## Run
@@ -36,23 +32,23 @@ $ ./build.sh
 The `-h` command line argument will display a brief list of command line options.
 
 Generate a logic circuit representation of the S-box:
-```console
-$ ./sboxgates
+```
+./sboxgates
 ```
 
 Generate a LUT circuit for output bit 0 of the S-box (using MPI):
-```console
-$ mpirun ./sboxgates -l -o 0
+```
+mpirun ./sboxgates -l -o 0
 ```
 
 Visualize a generated circuit with Graphwiz:
-```console
-$ ./sboxgates -d 1-067-162-3-c32281db.state | dot -Tpng > 1-067-162-3-c32281db.png
+```
+./sboxgates -d 1-067-162-3-c32281db.state | dot -Tpng > 1-067-162-3-c32281db.png
 ```
 
 Convert a generated circuit to C/CUDA:
-```console
-$ ./sboxgates -c 1-067-162-3-c32281db.state > 1-067-162-3-c32281db.c
+```
+./sboxgates -c 1-067-162-3-c32281db.state > 1-067-162-3-c32281db.c
 ```
 
 ## License
