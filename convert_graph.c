@@ -100,7 +100,7 @@ void print_digraph(const state st) {
 
 /* Called by print_c_function to get variable names. */
 static bool get_c_variable_name(const state st, const gatenum gate, char *buf, bool ptr_out) {
-  if (gate < 8) {
+  if (gate < get_num_inputs(&st)) {
     sprintf(buf, "in.b%" PRIgatenum, gate);
     return false;
   }
