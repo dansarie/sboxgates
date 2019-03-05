@@ -138,25 +138,23 @@ bool print_c_function(const state st) {
   }
   bool ptr_ret = num_outputs > 1;
 
-  #define TYPE_STR "bit_t"
-  const char TYPE[] = TYPE_STR;
-  const char STRUCT_STR[] = "typedef struct {\n"
-                            "  " TYPE_STR " b0;\n"
-                            "  " TYPE_STR " b1;\n"
-                            "  " TYPE_STR " b2;\n"
-                            "  " TYPE_STR " b3;\n"
-                            "  " TYPE_STR " b4;\n"
-                            "  " TYPE_STR " b5;\n"
-                            "  " TYPE_STR " b6;\n"
-                            "  " TYPE_STR " b7;\n"
-                            "} eightbits;\n";
+  const char TYPE[] = "bit_t";
   if (cuda) {
     printf("#define LUT(a,b,c,d,e) asm(\"lop3.b32 %%0, %%1, %%2, %%3, \"#e\";\" : \"=r\"(##a): "
         "\"r\"(##b), \"r\"(##c), \"r\"(##d));\n");
     printf("typedef uint %s;\n", TYPE);
-    printf(STRUCT_STR);
+  } else {
+    printf("typedef __m256i %s;\n", TYPE);
+  }
+  printf("typedef struct {\n");
+  for (int i = 0; i < get_num_inputs(&st); i++) {
+    printf("  %s b%d;\n", TYPE, i);
+  }
+  printf("} bits;\n");
+
+  if (cuda) {
     if (num_outputs > 1) {
-      printf("__device__ __forceinline__ void s(eightbits in");
+      printf("__device__ __forceinline__ void s(bits in");
       for (int outp = 0; outp < 8; outp++) {
         if (st.outputs[outp] != NO_GATE) {
           printf(", %s *out%d", TYPE, outp);
@@ -164,13 +162,11 @@ bool print_c_function(const state st) {
       }
       printf(") {\n");
     } else {
-      printf("__device__ __forceinline__ %s s%d(eightbits in) {\n", TYPE, outp_num);
+      printf("__device__ __forceinline__ %s s%d(bits in) {\n", TYPE, outp_num);
     }
   } else {
-    printf("typedef __m256i %s;\n", TYPE);
-    printf(STRUCT_STR);
     if (num_outputs > 1) {
-      printf("static inline void s(eightbits in");
+      printf("static inline void s(bits in");
       for (int outp = 0; outp < get_num_inputs(&st); outp++) {
         if (st.outputs[outp] != NO_GATE) {
           printf(", %s *out%d", TYPE, outp);
@@ -178,7 +174,7 @@ bool print_c_function(const state st) {
       }
       printf(") {\n");
     } else {
-      printf("static inline %s s%d(eightbits in) {\n", TYPE, outp_num);
+      printf("static inline %s s%d(bits in) {\n", TYPE, outp_num);
     }
   }
   char buf[10];
