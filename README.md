@@ -33,7 +33,7 @@ Generate a logic circuit representation of the Rijndael S-box:
 ./sboxgates -b sboxes/rijndael.txt
 ```
 
-Generate a LUT circuit for output bit 0 of the Rijdael S-box:
+Generate a LUT circuit for output bit 0 of the Rijndael S-box:
 ```
 mpirun ./sboxgates -l -o 0 -b sboxes/rijndael.txt
 ```
