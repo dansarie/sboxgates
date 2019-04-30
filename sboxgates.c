@@ -28,7 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <x86intrin.h>
+#include <stdlib.h>
 #include "convert_graph.h"
 #include "lut.h"
 #include "sboxgates.h"
@@ -49,13 +49,13 @@ metric g_metric = GATES;  /* Metric that should be used when selecting between t
 /* Test two truth tables for equality. */
 static inline bool ttable_equals(const ttable in1, const ttable in2) {
   ttable res = in1 ^ in2;
-  return _mm256_testz_si256(res, res);
+  return test_table(res, res);
 }
 
 /* Performs a masked test for equality. Only bits set to 1 in the mask will be tested. */
 bool ttable_equals_mask(const ttable in1, const ttable in2, const ttable mask) {
   ttable res = (in1 ^ in2) & mask;
-  return _mm256_testz_si256(res, res);
+  return test_table(res, res);
 }
 
 /* Adds a gate to the state st. Returns the gate id of the added gate. If an input gate is
@@ -250,7 +250,7 @@ static int get_num_outputs() {
     return outputs;
   }
   for (int i = 7; i >= 0; i--) {
-    if (!_mm256_testz_si256(g_target[i], g_target[i])) {
+    if (!test_table(g_target[i], g_target[i])) {
       outputs = i + 1;
       return outputs;
     }
@@ -867,7 +867,9 @@ static ttable generate_target(uint8_t bit, bool sbox) {
     *var >>= 1;
     *var |= (uint64_t)(((sbox ? g_sbox_enc[i] : i) >> bit) & 1) << 63;
   }
-  return _mm256_loadu_si256((ttable*)vec);
+  ttable t;
+  memcpy(&t, &vec, sizeof(ttable));
+  return t;
 }
 
 static ttable generate_mask(int num_inputs) {
@@ -882,7 +884,9 @@ static ttable generate_mask(int num_inputs) {
   if (num_inputs < 6) {
     mask_vec[0] = (1L << (1 << num_inputs)) - 1;
   }
-  return _mm256_loadu_si256((ttable*)mask_vec);
+  ttable t;
+  memcpy(&t, &mask_vec, sizeof(ttable));
+  return t;
 }
 
 void generate_graph_one_output(const bool andnot, const bool lut, const bool randomize,

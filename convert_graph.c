@@ -28,7 +28,7 @@
 /* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
   uint64_t vec[4];
-  _mm256_storeu_si256((ttable*)vec, tbl);
+  memcpy(((ttable*)vec), &tbl, sizeof(ttable));
   uint64_t *var = &vec[0];
   for (uint16_t i = 0; i < 256; i++) {
     if (i == 64) {
