@@ -22,7 +22,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <x86intrin.h>
 
 #define MAX_GATES 500
 #define NO_GATE ((gatenum)-1)
@@ -31,7 +30,12 @@
 typedef enum {IN, NOT, AND, OR, XOR, ANDNOT, LUT} gate_type;
 typedef enum {GATES, SAT} metric;
 
-typedef __m256i ttable; /* 256 bit truth table. */
+/* 256 bit truth table. */
+#define TABLE_SIZE 256
+typedef unsigned int ttable
+    __attribute((aligned(TABLE_SIZE / 8)))
+    __attribute((vector_size(TABLE_SIZE / 8)));
+
 typedef uint16_t gatenum;
 
 typedef struct {

@@ -20,6 +20,7 @@
 #include <assert.h>
 #include <mpi.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "lut.h"
 #include "sboxgates.h"
@@ -34,7 +35,7 @@ static inline void next_combination(gatenum *combination, int t, int max);
    truth table matching target in the positions where mask is set. */
 bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
     const ttable t3) {
-  ttable match = _mm256_setzero_si256();
+  ttable match = {0};
   ttable tt1 = ~t1;
   for (uint8_t i = 0; i < 2; i++) {
     ttable tt2 = ~t2;
@@ -44,7 +45,7 @@ bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1
         ttable r = tt1 & tt2 & tt3;
         if (ttable_equals_mask(target & r, r, mask)) {
           match |= r;
-        } else if (!_mm256_testz_si256(target & r & mask, target & r & mask)) {
+        } else if (!ttable_zero(target & r & mask)) {
           return false;
         }
         tt3 = ~tt3;
@@ -60,7 +61,7 @@ bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1
    truth table matching target in the positions where mask is set. */
 bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
     const ttable t3, const ttable t4, const ttable t5) {
-  ttable match = _mm256_setzero_si256();
+  ttable match = {0};
   ttable tt1 = ~t1;
   for (uint8_t i = 0; i < 2; i++) {
     ttable tt2 = ~t2;
@@ -74,7 +75,7 @@ bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1
             ttable r = tt1 & tt2 & tt3 & tt4 & tt5;
             if (ttable_equals_mask(target & r, r, mask)) {
               match |= r;
-            } else if (!_mm256_testz_si256(target & r & mask, target & r & mask)) {
+            } else if (!ttable_zero(target & r & mask)) {
               return false;
             }
             tt5 = ~tt5;
@@ -94,7 +95,7 @@ bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1
    truth table matching target in the positions where mask is set. */
 bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
     const ttable t3, const ttable t4, const ttable t5, const ttable t6, const ttable t7) {
-  ttable match = _mm256_setzero_si256();
+  ttable match = {0};
   ttable tt1 = ~t1;
   for (uint8_t i = 0; i < 2; i++) {
     ttable tt2 = ~t2;
@@ -112,7 +113,7 @@ bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1
                 ttable x = tt1 & tt2 & tt3 & tt4 & tt5 & tt6 & tt7;
                 if (ttable_equals_mask(target & x, x, mask)) {
                   match |= x;
-                } else if (!_mm256_testz_si256(target & x & mask, target & x & mask)) {
+                } else if (!ttable_zero(target & x & mask)) {
                   return false;
                 }
                 tt7 = ~tt7;
@@ -135,7 +136,7 @@ bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1
 /* Calculates the truth table of a LUT given its function and three input truth tables. */
 ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
     const ttable in3) {
-  ttable ret = _mm256_setzero_si256();
+  ttable ret = {0};
   if (function & 1) {
     ret |= ~in1 & ~in2 & ~in3;
   }
@@ -185,11 +186,11 @@ bool get_lut_function(const ttable in1, const ttable in2, const ttable in3, cons
   uint64_t target_v[4];
   uint64_t mask_v[4];
 
-  _mm256_storeu_si256((ttable*)in1_v, in1);
-  _mm256_storeu_si256((ttable*)in2_v, in2);
-  _mm256_storeu_si256((ttable*)in3_v, in3);
-  _mm256_storeu_si256((ttable*)target_v, target);
-  _mm256_storeu_si256((ttable*)mask_v, mask);
+  memcpy((ttable*)in1_v, &in1, sizeof(ttable));
+  memcpy((ttable*)in2_v, &in2, sizeof(ttable));
+  memcpy((ttable*)in3_v, &in3, sizeof(ttable));
+  memcpy((ttable*)target_v, &target, sizeof(ttable));
+  memcpy((ttable*)mask_v, &mask, sizeof(ttable));
 
   for (int v = 0; v < 4; v++) {
     for (int i = 0; i < 64; i++) {
