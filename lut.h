@@ -63,6 +63,4 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
    and ret[3] - ret[9] the seven input gate numbers. */
 bool search_7lut(const state st, const ttable target, const ttable mask, uint16_t *ret);
 
-bool test_table(ttable x, ttable y);
-
 #endif /* __LUT_H__ */

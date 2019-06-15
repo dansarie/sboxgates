@@ -46,16 +46,24 @@ uint8_t g_sbox_enc[256];    /* Target S-box. */
 ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
 metric g_metric = GATES;  /* Metric that should be used when selecting between two solutions. */
 
+/* Returns true if the truth table is all-zero. */
+bool ttable_zero(ttable tt) {
+  for(size_t i = 0; i < sizeof(ttable) / sizeof(uint64_t); i++) {
+    if(tt[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* Test two truth tables for equality. */
 static inline bool ttable_equals(const ttable in1, const ttable in2) {
-  ttable res = in1 ^ in2;
-  return test_table(res, res);
+  return ttable_zero(in1 ^ in2);
 }
 
 /* Performs a masked test for equality. Only bits set to 1 in the mask will be tested. */
 bool ttable_equals_mask(const ttable in1, const ttable in2, const ttable mask) {
-  ttable res = (in1 ^ in2) & mask;
-  return test_table(res, res);
+  return ttable_zero((in1 ^ in2) & mask);
 }
 
 /* Adds a gate to the state st. Returns the gate id of the added gate. If an input gate is
@@ -250,7 +258,7 @@ static int get_num_outputs() {
     return outputs;
   }
   for (int i = 7; i >= 0; i--) {
-    if (!test_table(g_target[i], g_target[i])) {
+    if (!ttable_zero(g_target[i])) {
       outputs = i + 1;
       return outputs;
     }

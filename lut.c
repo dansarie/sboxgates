@@ -31,23 +31,11 @@ static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_re
 static inline int64_t n_choose_k(int n, int k);
 static inline void next_combination(gatenum *combination, int t, int max);
 
-static ttable zeroes = {0};
-
-/* Returns true if the bitwise and of two truth tables is zero, false otherwise */
-bool test_table(ttable x, ttable y){
-    for(size_t i = 0; i < sizeof(ttable)/sizeof(uint64_t); i++){
-        if(((x[i] & y[i]))){
-            return false;
-        }
-    }
-    return true;
-}
-
 /* Returns true if it is possible to generate a LUT with the three input truth tables and an output
    truth table matching target in the positions where mask is set. */
 bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
     const ttable t3) {
-  ttable match = zeroes;
+  ttable match = {0};
   ttable tt1 = ~t1;
   for (uint8_t i = 0; i < 2; i++) {
     ttable tt2 = ~t2;
@@ -57,7 +45,7 @@ bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1
         ttable r = tt1 & tt2 & tt3;
         if (ttable_equals_mask(target & r, r, mask)) {
           match |= r;
-        } else if (!test_table(target & r & mask, target & r & mask)) {
+        } else if (!ttable_zero(target & r & mask)) {
           return false;
         }
         tt3 = ~tt3;
@@ -73,7 +61,7 @@ bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1
    truth table matching target in the positions where mask is set. */
 bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
     const ttable t3, const ttable t4, const ttable t5) {
-  ttable match = zeroes;
+  ttable match = {0};
   ttable tt1 = ~t1;
   for (uint8_t i = 0; i < 2; i++) {
     ttable tt2 = ~t2;
@@ -87,7 +75,7 @@ bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1
             ttable r = tt1 & tt2 & tt3 & tt4 & tt5;
             if (ttable_equals_mask(target & r, r, mask)) {
               match |= r;
-            } else if (!test_table(target & r & mask, target & r & mask)) {
+            } else if (!ttable_zero(target & r & mask)) {
               return false;
             }
             tt5 = ~tt5;
@@ -107,7 +95,7 @@ bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1
    truth table matching target in the positions where mask is set. */
 bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
     const ttable t3, const ttable t4, const ttable t5, const ttable t6, const ttable t7) {
-  ttable match = zeroes;
+  ttable match = {0};
   ttable tt1 = ~t1;
   for (uint8_t i = 0; i < 2; i++) {
     ttable tt2 = ~t2;
@@ -125,7 +113,7 @@ bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1
                 ttable x = tt1 & tt2 & tt3 & tt4 & tt5 & tt6 & tt7;
                 if (ttable_equals_mask(target & x, x, mask)) {
                   match |= x;
-                } else if (!test_table(target & x & mask, target & x & mask)) {
+                } else if (!ttable_zero(target & x & mask)) {
                   return false;
                 }
                 tt7 = ~tt7;
@@ -148,7 +136,7 @@ bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1
 /* Calculates the truth table of a LUT given its function and three input truth tables. */
 ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
     const ttable in3) {
-  ttable ret = zeroes;
+  ttable ret = {0};
   if (function & 1) {
     ret |= ~in1 & ~in2 & ~in3;
   }
@@ -198,11 +186,11 @@ bool get_lut_function(const ttable in1, const ttable in2, const ttable in3, cons
   uint64_t target_v[4];
   uint64_t mask_v[4];
 
-  memcpy(((ttable*)in1_v), &in1, sizeof(ttable));
-  memcpy(((ttable*)in2_v), &in2, sizeof(ttable));
-  memcpy(((ttable*)in3_v), &in3, sizeof(ttable));
-  memcpy(((ttable*)target_v), &target, sizeof(ttable));
-  memcpy(((ttable*)mask_v), &mask, sizeof(ttable));
+  memcpy((ttable*)in1_v, &in1, sizeof(ttable));
+  memcpy((ttable*)in2_v, &in2, sizeof(ttable));
+  memcpy((ttable*)in3_v, &in3, sizeof(ttable));
+  memcpy((ttable*)target_v, &target, sizeof(ttable));
+  memcpy((ttable*)mask_v, &mask, sizeof(ttable));
 
   for (int v = 0; v < 4; v++) {
     for (int i = 0; i < 64; i++) {
