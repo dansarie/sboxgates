@@ -262,8 +262,6 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
 
   ttable tt[5] = {st.gates[nums[0]].table, st.gates[nums[1]].table, st.gates[nums[2]].table,
       st.gates[nums[3]].table, st.gates[nums[4]].table};
-  gatenum cache_set[3] = {NO_GATE, NO_GATE, NO_GATE};
-  ttable cache[256];
 
   memset(ret, 0, sizeof(uint16_t) * 10);
 
@@ -280,43 +278,49 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
   bool quit = false;
   for (uint64_t i = start_n; !quit && i < stop_n; i++) {
     if (check_5lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4])) {
-      if (cache_set[0] != nums[0] || cache_set[1] != nums[1] || cache_set[2] != nums[2]) {
-        generate_lut_ttables(tt[0], tt[1], tt[2], cache);
-        cache_set[0] = nums[0];
-        cache_set[1] = nums[1];
-        cache_set[2] = nums[2];
-      }
-
-      for (uint16_t fo = 0; !quit && fo < 256; fo++) {
-        uint8_t func_outer = func_order[fo];
-        ttable t_outer = cache[func_outer];
-        uint8_t func_inner;
-        if (!get_lut_function(t_outer, tt[3], tt[4], target, mask, true, &func_inner)) {
-          continue;
+      /* Try all 10 ways to build a 5LUT from two 3LUTs. */
+      gatenum order[5] = {0, 1, 2, 3, 4};
+      for (int k = 0; k < 10; k++) {
+        for (uint16_t fo = 0; !quit && fo < 256; fo++) {
+          uint8_t func_outer = func_order[fo];
+          ttable t_outer = generate_lut_ttable(func_outer, tt[order[0]], tt[order[1]],
+              tt[order[2]]);
+          uint8_t func_inner;
+          if (!get_lut_function(t_outer, tt[order[3]], tt[order[4]], target, mask, true,
+              &func_inner)) {
+            continue;
+          }
+          ttable t_inner = generate_lut_ttable(func_inner, t_outer, tt[order[3]], tt[order[4]]);
+          assert(ttable_equals_mask(target, t_inner, mask));
+          ret[0] = func_outer;
+          ret[1] = func_inner;
+          ret[2] = nums[order[0]];
+          ret[3] = nums[order[1]];
+          ret[4] = nums[order[2]];
+          ret[5] = nums[order[3]];
+          ret[6] = nums[order[4]];
+          ret[7] = 0;
+          ret[8] = 0;
+          ret[9] = 0;
+          assert(send_req == MPI_REQUEST_NULL);
+          if (rank == 0) {
+            quit_msg = 0;
+          } else {
+            MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+          }
+          quit = true;
+          printf("[% 4d] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n", rank, ret[0],
+              ret[1], ret[2], ret[3], ret[4], ret[5], ret[6]);
         }
-        ttable t_inner = generate_lut_ttable(func_inner, t_outer, tt[3], tt[4]);
-        assert(ttable_equals_mask(target, t_inner, mask));
-        ret[0] = func_outer;
-        ret[1] = func_inner;
-        ret[2] = nums[0];
-        ret[3] = nums[1];
-        ret[4] = nums[2];
-        ret[5] = nums[3];
-        ret[6] = nums[4];
-        ret[7] = 0;
-        ret[8] = 0;
-        ret[9] = 0;
-        assert(send_req == MPI_REQUEST_NULL);
-        if (rank == 0) {
-          quit_msg = 0;
-        } else {
-          MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
-        }
-        quit = true;
-        printf("[% 4d] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n", rank, func_outer,
-            func_inner, nums[0], nums[1], nums[2], nums[3], nums[4]);
+        next_combination(order, 3, 5); /* Next combination of three gates. */
+        /* Work out the other two gates. */
+        unsigned int xx = ~((1 << order[0]) | (1 << order[1]) | (1 << order[2]));
+        order[3] = __builtin_ffs(xx) - 1;
+        xx ^= 1 << order[3];
+        order[4] = __builtin_ffs(xx) - 1;
       }
     }
+
     if (!quit) {
       int flag;
       MPI_Test(&recv_req, &flag, MPI_STATUS_IGNORE);
