@@ -324,6 +324,11 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
         break;
       }
       next_combination(nums, 5, st.num_gates);
+      tt[0] = st.gates[nums[0]].table;
+      tt[1] = st.gates[nums[1]].table;
+      tt[2] = st.gates[nums[2]].table;
+      tt[3] = st.gates[nums[3]].table;
+      tt[4] = st.gates[nums[4]].table;
     }
   }
 
@@ -381,6 +386,13 @@ bool search_7lut(const state st, const ttable target, const ttable mask, uint16_
       break;
     }
     next_combination(nums, 7, st.num_gates);
+    tt[0] = st.gates[nums[0]].table;
+    tt[1] = st.gates[nums[1]].table;
+    tt[2] = st.gates[nums[2]].table;
+    tt[3] = st.gates[nums[3]].table;
+    tt[4] = st.gates[nums[4]].table;
+    tt[5] = st.gates[nums[5]].table;
+    tt[6] = st.gates[nums[6]].table;
   }
 
   /* Gather the number of hits for each rank.*/
@@ -524,6 +536,7 @@ bool search_7lut(const state st, const ttable target, const ttable mask, uint16_
 static void get_nth_combination(int64_t n, int num_gates, int t, gatenum first, gatenum *ret) {
   assert(ret != NULL);
   assert(t <= num_gates);
+  assert(n < n_choose_k(num_gates, t));
 
   if (t == 0) {
     return;
