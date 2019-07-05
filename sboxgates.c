@@ -1248,6 +1248,7 @@ int main(int argc, char **argv) {
   }
 
   state st;
+  memset(&st, 0, sizeof(state));
   if (strlen(gfname) == 0) {
     st.max_sat_metric = INT_MAX;
     st.sat_metric = 0;
