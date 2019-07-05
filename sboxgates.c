@@ -38,6 +38,7 @@ typedef struct {
   state st;
   ttable target;
   ttable mask;
+  int8_t inbits[8];
   bool quit;
 } mpi_work;
 
@@ -390,7 +391,12 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     /* Broadcast work to be done. */
-    mpi_work work = {*st, target, mask, false};
+    mpi_work work;
+    work.st = *st;
+    work.target = target;
+    work.mask = mask;
+    work.quit = false;
+    memcpy(work.inbits, inbits, sizeof(uint8_t) * 8);
     MPI_Bcast(&work, sizeof(work), MPI_BYTE, 0, MPI_COMM_WORLD);
 
     /* Look through all combinations of five gates in the circuit. For each combination, check if
@@ -403,7 +409,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     memset(res, 0, sizeof(uint16_t) * 10);
     printf("[   0] Search 5.\n");
 
-    if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, res)) {
+    if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, work.inbits, res)) {
       uint8_t func_outer = (uint8_t)res[0];
       uint8_t func_inner = (uint8_t)res[1];
       gatenum a = res[2];
@@ -429,7 +435,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     }
 
     printf("[   0] Search 7.\n");
-    if (work.st.num_gates >= 7 && search_7lut(work.st, work.target, work.mask, res)) {
+    if (work.st.num_gates >= 7 && search_7lut(work.st, work.target, work.mask, work.inbits, res)) {
       uint8_t func_outer = (uint8_t)res[0];
       uint8_t func_middle = (uint8_t)res[1];
       uint8_t func_inner = (uint8_t)res[2];
@@ -849,11 +855,11 @@ static void mpi_worker() {
       return;
     }
 
-    if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, res)) {
+    if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, work.inbits, res)) {
       continue;
     }
     if (work.st.num_gates >= 7) {
-      search_7lut(work.st, work.target, work.mask, res);
+      search_7lut(work.st, work.target, work.mask, work.inbits, res);
     }
   }
 }

@@ -175,45 +175,33 @@ void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3, 
 /* Returns a LUT function func with the three input truth tables with an output truth table matching
    target in the positions where mask is set. Returns true on success and false if no function that
    can satisfy the target truth table exists. */
-bool get_lut_function(const ttable in1, const ttable in2, const ttable in3, const ttable target,
-    const ttable mask, const bool randomize, uint8_t *func) {
+bool get_lut_function(ttable in1, ttable in2, ttable in3, ttable target, ttable mask,
+    const bool randomize, uint8_t *func) {
   *func = 0;
-  uint8_t tableset = 0;
+  uint64_t funcset = 0; /* Keeps track of which function bits have been set. */
 
-  uint64_t in1_v[4];
-  uint64_t in2_v[4];
-  uint64_t in3_v[4];
-  uint64_t target_v[4];
-  uint64_t mask_v[4];
-
-  memcpy((ttable*)in1_v, &in1, sizeof(ttable));
-  memcpy((ttable*)in2_v, &in2, sizeof(ttable));
-  memcpy((ttable*)in3_v, &in3, sizeof(ttable));
-  memcpy((ttable*)target_v, &target, sizeof(ttable));
-  memcpy((ttable*)mask_v, &mask, sizeof(ttable));
-
-  for (int v = 0; v < 4; v++) {
-    for (int i = 0; i < 64; i++) {
-      if (mask_v[v] & 1) {
-        uint8_t temp = ((in1_v[v] & 1) << 2) | ((in2_v[v] & 1) << 1) | (in3_v[v] & 1);
-        if ((tableset & (1 << temp)) == 0) {
-          *func |= (target_v[v] & 1) << temp;
-          tableset |= 1 << temp;
-        } else if ((*func & (1 << temp)) != ((target_v[v] & 1) << temp)) {
+  while (!ttable_zero(mask)) {
+    for (int v = 0; v < sizeof(ttable) / sizeof(uint64_t); v++) {
+      if (mask[v] & 1) {
+        uint64_t temp = ((in1[v] & 1) << 2) | ((in2[v] & 1) << 1) | (in3[v] & 1);
+        if ((funcset & (1 << temp)) == 0) {
+          *func |= (target[v] & 1) << temp;
+          funcset |= 1 << temp;
+        } else if ((*func & (1 << temp)) != ((target[v] & 1) << temp)) {
           return false;
         }
       }
-      target_v[v] >>= 1;
-      mask_v[v] >>= 1;
-      in1_v[v] >>= 1;
-      in2_v[v] >>= 1;
-      in3_v[v] >>= 1;
     }
+    target >>= 1;
+    mask >>= 1;
+    in1 >>= 1;
+    in2 >>= 1;
+    in3 >>= 1;
   }
 
   /* Randomize don't-cares in table. */
-  if (randomize && tableset != 0xff) {
-    *func |= ~tableset & (uint8_t)xorshift1024();
+  if (randomize && funcset != 0xff) {
+    *func |= ~funcset & (uint8_t)xorshift1024();
   }
 
   return true;
@@ -224,7 +212,8 @@ bool get_lut_function(const ttable in1, const ttable in2, const ttable in3, cons
    true on success. In that case the result is returned in the 7 position array ret: ret[0]
    contains the outer LUT function, ret[1] the inner LUT function, and ret[2] - ret[6] the five
    input gate numbers. */
-bool search_5lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
+bool search_5lut(const state st, const ttable target, const ttable mask, const int8_t *inbits,
+    uint16_t *ret) {
   assert(ret != NULL);
   assert(st.num_gates >= 5);
 
@@ -257,13 +246,6 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
     start_n = (worker_space_size + 1) * remainder + worker_space_size * (rank - remainder);
     stop_n = start_n + worker_space_size;
   }
-  gatenum nums[5] = {NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE};
-  get_nth_combination(start_n, st.num_gates, 5, 0, nums);
-
-  ttable tt[5] = {st.gates[nums[0]].table, st.gates[nums[1]].table, st.gates[nums[2]].table,
-      st.gates[nums[3]].table, st.gates[nums[4]].table};
-
-  memset(ret, 0, sizeof(uint16_t) * 10);
 
   MPI_Request recv_req = MPI_REQUEST_NULL;
   MPI_Request send_req = MPI_REQUEST_NULL;
@@ -275,9 +257,33 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
     MPI_Irecv(&quit_msg, 1, MPI_INT, 0, 2, MPI_COMM_WORLD, &recv_req);
   }
 
+  if (start_n >= n_choose_k(st.num_gates, 5)) {
+    return get_search_result(ret, &quit_msg, &recv_req, &send_req);
+  }
+
+  gatenum nums[5] = {NO_GATE, NO_GATE, NO_GATE, NO_GATE, NO_GATE};
+  get_nth_combination(start_n, st.num_gates, 5, 0, nums);
+
+  ttable tt[5] = {st.gates[nums[0]].table, st.gates[nums[1]].table, st.gates[nums[2]].table,
+      st.gates[nums[3]].table, st.gates[nums[4]].table};
+
+  memset(ret, 0, sizeof(uint16_t) * 10);
+
   bool quit = false;
   for (uint64_t i = start_n; !quit && i < stop_n; i++) {
-    if (check_5lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4])) {
+    /* Reject input gate combinations that contain a bit that the algorithm has already been used
+       as a multiplexer input in step 5 of the algorithm. */
+    bool rejected = false;
+    for (int k = 0; !rejected && inbits[k] != -1; k++) {
+      for (int m = 0; m < 5; m++) {
+        if (nums[m] == inbits[k]) {
+          rejected = true;
+          break;
+        }
+      }
+    }
+
+    if (!rejected && check_5lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4])) {
       /* Try all 10 ways to build a 5LUT from two 3LUTs. */
       gatenum order[5] = {0, 1, 2, 3, 4};
       for (int k = 0; k < 10; k++) {
@@ -344,7 +350,8 @@ bool search_5lut(const state st, const ttable target, const ttable mask, uint16_
    true on success. In that case the result is returned in the 10 position array ret: ret[0]
    contains the outer LUT function, ret[1] the middle LUT function, ret[2] the inner LUT function,
    and ret[3] - ret[9] the seven input gate numbers. */
-bool search_7lut(const state st, const ttable target, const ttable mask, uint16_t *ret) {
+bool search_7lut(const state st, const ttable target, const ttable mask, const int8_t *inbits,
+    uint16_t *ret) {
   assert(ret != NULL);
   assert(st.num_gates >= 7);
 
@@ -365,8 +372,13 @@ bool search_7lut(const state st, const ttable target, const ttable mask, uint16_
     start = (worker_space_size + 1) * remainder + worker_space_size * (rank - remainder);
     stop = start + worker_space_size;
   }
+
   gatenum nums[7];
-  get_nth_combination(start, st.num_gates, 7, 0, nums);
+  if (start > n_choose_k(st.num_gates, 7)) {
+    memset(nums, 0, sizeof(gatenum) * 7);
+  } else {
+    get_nth_combination(start, st.num_gates, 7, 0, nums);
+  }
 
   ttable tt[7] = {st.gates[nums[0]].table, st.gates[nums[1]].table, st.gates[nums[2]].table,
       st.gates[nums[3]].table, st.gates[nums[4]].table, st.gates[nums[5]].table,
@@ -377,7 +389,20 @@ bool search_7lut(const state st, const ttable target, const ttable mask, uint16_
   assert(result != NULL);
   int p = 0;
   for (uint64_t i = start; i < stop; i++) {
-    if (check_7lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4], tt[5], tt[6])) {
+    /* Reject input gate combinations that contain a bit that the algorithm has already been used
+       as a multiplexer input in step 5 of the algorithm. */
+    bool rejected = false;
+    for (int k = 0; !rejected && inbits[k] != -1; k++) {
+      for (int m = 0; m < 7; m++) {
+        if (nums[m] == inbits[k]) {
+          rejected = true;
+          break;
+        }
+      }
+    }
+
+    if (!rejected
+        && check_7lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4], tt[5], tt[6])) {
       result[p++] = nums[0];
       result[p++] = nums[1];
       result[p++] = nums[2];
@@ -466,68 +491,90 @@ bool search_7lut(const state st, const ttable target, const ttable mask, uint16_
   }
 
   bool quit = false;
+  const int order[70 * 7] = {
+      0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 6, 5, 0, 1, 2, 3, 5, 6, 4, 0, 1, 2, 4, 5, 6, 3,
+      0, 1, 3, 2, 4, 5, 6, 0, 1, 3, 2, 4, 6, 5, 0, 1, 3, 2, 5, 6, 4, 0, 1, 3, 4, 5, 6, 2,
+      0, 1, 4, 2, 3, 5, 6, 0, 1, 4, 2, 3, 6, 5, 0, 1, 4, 2, 5, 6, 3, 0, 1, 4, 3, 5, 6, 2,
+      0, 1, 5, 2, 3, 4, 6, 0, 1, 5, 2, 3, 6, 4, 0, 1, 5, 2, 4, 6, 3, 0, 1, 5, 3, 4, 6, 2,
+      0, 1, 6, 2, 3, 4, 5, 0, 1, 6, 2, 3, 5, 4, 0, 1, 6, 2, 4, 5, 3, 0, 1, 6, 3, 4, 5, 2,
+      0, 2, 3, 1, 4, 5, 6, 0, 2, 3, 1, 4, 6, 5, 0, 2, 3, 1, 5, 6, 4, 0, 2, 3, 4, 5, 6, 1,
+      0, 2, 4, 1, 3, 5, 6, 0, 2, 4, 1, 3, 6, 5, 0, 2, 4, 1, 5, 6, 3, 0, 2, 4, 3, 5, 6, 1,
+      0, 2, 5, 1, 3, 4, 6, 0, 2, 5, 1, 3, 6, 4, 0, 2, 5, 1, 4, 6, 3, 0, 2, 5, 3, 4, 6, 1,
+      0, 2, 6, 1, 3, 4, 5, 0, 2, 6, 1, 3, 5, 4, 0, 2, 6, 1, 4, 5, 3, 0, 2, 6, 3, 4, 5, 1,
+      0, 3, 4, 1, 2, 5, 6, 0, 3, 4, 1, 2, 6, 5, 0, 3, 4, 1, 5, 6, 2, 0, 3, 4, 2, 5, 6, 1,
+      0, 3, 5, 1, 2, 4, 6, 0, 3, 5, 1, 2, 6, 4, 0, 3, 5, 1, 4, 6, 2, 0, 3, 5, 2, 4, 6, 1,
+      0, 3, 6, 1, 2, 4, 5, 0, 3, 6, 1, 2, 5, 4, 0, 3, 6, 1, 4, 5, 2, 0, 3, 6, 2, 4, 5, 1,
+      0, 4, 5, 1, 2, 3, 6, 0, 4, 5, 1, 2, 6, 3, 0, 4, 5, 1, 3, 6, 2, 0, 4, 5, 2, 3, 6, 1,
+      0, 4, 6, 1, 2, 3, 5, 0, 4, 6, 1, 2, 5, 3, 0, 4, 6, 1, 3, 5, 2, 0, 4, 6, 2, 3, 5, 1,
+      0, 5, 6, 1, 2, 3, 4, 0, 5, 6, 1, 2, 4, 3, 0, 5, 6, 1, 3, 4, 2, 0, 5, 6, 2, 3, 4, 1,
+      1, 2, 3, 4, 5, 6, 0, 1, 2, 4, 3, 5, 6, 0, 1, 2, 5, 3, 4, 6, 0, 1, 2, 6, 3, 4, 5, 0,
+      1, 3, 4, 2, 5, 6, 0, 1, 3, 5, 2, 4, 6, 0, 1, 3, 6, 2, 4, 5, 0, 1, 4, 5, 2, 3, 6, 0,
+      1, 4, 6, 2, 3, 5, 0, 1, 5, 6, 2, 3, 4, 0
+    };
   for (int i = start; !quit && i < stop; i++) {
-    const gatenum a = lut_list[7 * i];
-    const gatenum b = lut_list[7 * i + 1];
-    const gatenum c = lut_list[7 * i + 2];
-    const gatenum d = lut_list[7 * i + 3];
-    const gatenum e = lut_list[7 * i + 4];
-    const gatenum f = lut_list[7 * i + 5];
-    const gatenum g = lut_list[7 * i + 6];
-    const ttable ta = st.gates[a].table;
-    const ttable tb = st.gates[b].table;
-    const ttable tc = st.gates[c].table;
-    const ttable td = st.gates[d].table;
-    const ttable te = st.gates[e].table;
-    const ttable tf = st.gates[f].table;
-    const ttable tg = st.gates[g].table;
-    if (((uint64_t)a << 32 | (uint64_t)b << 16 | c) != outer_cache_set) {
-      generate_lut_ttables(ta, tb, tc, outer_cache);
-      outer_cache_set = (uint64_t)a << 32 | (uint64_t)b << 16 | c;
-    }
-    if (((uint64_t)d << 32 | (uint64_t)e << 16 | f) != middle_cache_set) {
-      generate_lut_ttables(td, te, tf, middle_cache);
-      middle_cache_set = (uint64_t)d << 32 | (uint64_t)e << 16 | f;
-    }
-
-    for (uint16_t fo = 0; !quit && fo < 256; fo++) {
-      uint8_t func_outer = outer_func_order[fo];
-      ttable t_outer = outer_cache[func_outer];
-      for (uint16_t fm = 0; !quit && fm < 256; fm++) {
-        uint8_t func_middle = middle_func_order[fm];
-        ttable t_middle = middle_cache[func_middle];
-        uint8_t func_inner;
-        if (!get_lut_function(t_outer, t_middle, tg, target, mask, true, &func_inner)) {
-          continue;
-        }
-        ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
-        assert(ttable_equals_mask(target, t_inner, mask));
-        ret[0] = func_outer;
-        ret[1] = func_middle;
-        ret[2] = func_inner;
-        ret[3] = a;
-        ret[4] = b;
-        ret[5] = c;
-        ret[6] = d;
-        ret[7] = e;
-        ret[8] = f;
-        ret[9] = g;
-        assert(send_req == MPI_REQUEST_NULL);
-        if (rank == 0) {
-          quit_msg = 0;
-        } else {
-          MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
-        }
-        quit = true;
-        printf("[% 4d] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n", rank, func_outer,
-            func_middle, func_inner, a, b, c, d, e, f, g);
+    for (int k = 0; !quit && k < 70; k++) {
+      const gatenum a = lut_list[7 * i + order[7 * k + 0]];
+      const gatenum b = lut_list[7 * i + order[7 * k + 1]];
+      const gatenum c = lut_list[7 * i + order[7 * k + 2]];
+      const gatenum d = lut_list[7 * i + order[7 * k + 3]];
+      const gatenum e = lut_list[7 * i + order[7 * k + 4]];
+      const gatenum f = lut_list[7 * i + order[7 * k + 5]];
+      const gatenum g = lut_list[7 * i + order[7 * k + 6]];
+      const ttable ta = st.gates[a].table;
+      const ttable tb = st.gates[b].table;
+      const ttable tc = st.gates[c].table;
+      const ttable td = st.gates[d].table;
+      const ttable te = st.gates[e].table;
+      const ttable tf = st.gates[f].table;
+      const ttable tg = st.gates[g].table;
+      if (((uint64_t)a << 32 | (uint64_t)b << 16 | c) != outer_cache_set) {
+        generate_lut_ttables(ta, tb, tc, outer_cache);
+        outer_cache_set = (uint64_t)a << 32 | (uint64_t)b << 16 | c;
       }
-    }
-    if (!quit) {
-      int flag;
-      MPI_Test(&recv_req, &flag, MPI_STATUS_IGNORE);
-      if (flag) {
-        quit = true;
+      if (((uint64_t)d << 32 | (uint64_t)e << 16 | f) != middle_cache_set) {
+        generate_lut_ttables(td, te, tf, middle_cache);
+        middle_cache_set = (uint64_t)d << 32 | (uint64_t)e << 16 | f;
+      }
+
+      for (uint16_t fo = 0; !quit && fo < 256; fo++) {
+        uint8_t func_outer = outer_func_order[fo];
+        ttable t_outer = outer_cache[func_outer];
+        for (uint16_t fm = 0; !quit && fm < 256; fm++) {
+          uint8_t func_middle = middle_func_order[fm];
+          ttable t_middle = middle_cache[func_middle];
+          uint8_t func_inner;
+          if (!get_lut_function(t_outer, t_middle, tg, target, mask, true, &func_inner)) {
+            continue;
+          }
+          ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+          assert(ttable_equals_mask(target, t_inner, mask));
+          ret[0] = func_outer;
+          ret[1] = func_middle;
+          ret[2] = func_inner;
+          ret[3] = a;
+          ret[4] = b;
+          ret[5] = c;
+          ret[6] = d;
+          ret[7] = e;
+          ret[8] = f;
+          ret[9] = g;
+          assert(send_req == MPI_REQUEST_NULL);
+          if (rank == 0) {
+            quit_msg = 0;
+          } else {
+            MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
+          }
+          quit = true;
+          printf("[% 4d] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n", rank,
+              func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
+        }
+      }
+      if (!quit) {
+        int flag;
+        MPI_Test(&recv_req, &flag, MPI_STATUS_IGNORE);
+        if (flag) {
+          quit = true;
+        }
       }
     }
   }

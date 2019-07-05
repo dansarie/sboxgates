@@ -32,7 +32,7 @@ typedef enum {GATES, SAT} metric;
 
 /* 256 bit truth table. */
 #define TABLE_SIZE 256
-typedef unsigned int ttable
+typedef uint64_t ttable
     __attribute((aligned(TABLE_SIZE / 8)))
     __attribute((vector_size(TABLE_SIZE / 8)));
 

@@ -54,13 +54,15 @@ bool get_lut_function(const ttable in1, const ttable in2, const ttable in3, cons
    true on success. In that case the result is returned in the 7 position array ret: ret[0]
    contains the outer LUT function, ret[1] the inner LUT function, and ret[2] - ret[6] the five
    input gate numbers. */
-bool search_5lut(const state st, const ttable target, const ttable mask, uint16_t *ret);
+bool search_5lut(const state st, const ttable target, const ttable mask, const int8_t *inbits,
+    uint16_t *ret);
 
 /* Search for a combination of seven outputs in the graph that can be connected with a 7-input LUT
    to create an output truth table that matches target in the positions where mask is set. Returns
    true on success. In that case the result is returned in the 10 position array ret: ret[0]
    contains the outer LUT function, ret[1] the middle LUT function, ret[2] the inner LUT function,
    and ret[3] - ret[9] the seven input gate numbers. */
-bool search_7lut(const state st, const ttable target, const ttable mask, uint16_t *ret);
+bool search_7lut(const state st, const ttable target, const ttable mask, const int8_t *inbits,
+    uint16_t *ret);
 
 #endif /* __LUT_H__ */
