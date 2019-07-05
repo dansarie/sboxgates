@@ -13,6 +13,7 @@ use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 
 ## Dependencies
 
+* [CMake](https://github.com/Kitware/CMake) (for build)
 * MPI
 * [msgpack](https://github.com/msgpack/msgpack-c)
 * [Graphviz](https://github.com/ellson/graphviz) (for generating visual representations)
@@ -21,7 +22,10 @@ use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 
 ```
 sudo apt-get install libmsgpack-dev libopenmpi-dev openmpi-bin
-./build.sh
+mkdir build
+cd build
+cmake ..
+make
 ```
 
 ## Run
