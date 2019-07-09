@@ -180,10 +180,10 @@ bool print_c_function(const state st) {
   char buf[10];
   for (int gate = get_num_inputs(&st); gate < st.num_gates; gate++) {
     bool ret = get_c_variable_name(st, gate, buf, ptr_ret);
-    if (ret != true) {
-      printf("  %s = ", buf);
-    } else {
+    if (ret || buf[0] != '*') {
       printf("  %s %s = ", TYPE, buf);
+    } else {
+      printf("  %s = ", buf);
     }
     if (st.gates[gate].type == LUT) {
       printf("LUT(%s, ", buf);
