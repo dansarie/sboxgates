@@ -292,6 +292,20 @@ uint64_t xorshift1024() {
   return rand[p] * 1181783497276652981U;
 }
 
+/* Used in create_circuit to check if any solutions with smaller metric are possible. Uses either
+   the add or the add_sat parameter depending on the current metric in use according to the
+   g_metric global variable. Returns true if a solution with the provided metric is possible with
+   respect to the value of st->max_gates or st->max_sat_metric. */
+static bool check_num_gates_possible(state *st, int add, int add_sat) {
+  if (g_metric == SAT && st->sat_metric + add_sat > st->max_sat_metric) {
+    return false;
+  }
+  if (st->num_gates + add > st->max_gates) {
+    return false;
+  }
+  return true;
+}
+
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
    paper. */
 static gatenum create_circuit(state *st, const ttable target, const ttable mask,
@@ -324,6 +338,10 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   /* 2. If there are any gates whose inverse produces the desired map, append a NOT gate, and
      return the ID of the NOT gate. */
 
+  if (!check_num_gates_possible(st, 1, get_sat_metric(NOT))) {
+    return NO_GATE;
+  }
+
   for (int i = 0; i < st->num_gates; i++) {
     if (ttable_equals_mask(target, ~st->gates[gate_order[i]].table, mask)) {
       return add_not_gate(st, gate_order[i]);
@@ -332,6 +350,10 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
   /* 3. Look at all pairs of gates in the existing circuit. If they can be combined with a single
      gate to produce the desired map, add that single gate and return its ID. */
+
+  if (!check_num_gates_possible(st, 1, get_sat_metric(AND))) {
+    return NO_GATE;
+  }
 
   const ttable mtarget = target & mask;
   for (int i = 0; i < st->num_gates; i++) {
@@ -387,6 +409,10 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       }
     }
 
+    if (!check_num_gates_possible(st, 2, 0)) {
+      return NO_GATE;
+    }
+
     int size;
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -434,6 +460,14 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           add_lut(st, func_outer, t_outer, a, b, c), d, e);
     }
 
+    if (!check_num_gates_possible(st, 3, 0)) {
+      bool search7 = false;
+      MPI_Bcast(&search7, sizeof(search7), MPI_C_BOOL, 0, MPI_COMM_WORLD);
+      return NO_GATE;
+    }
+    bool search7 = true;
+    MPI_Bcast(&search7, sizeof(search7), MPI_C_BOOL, 0, MPI_COMM_WORLD);
+
     printf("[   0] Search 7.\n");
     if (work.st.num_gates >= 7 && search_7lut(work.st, work.target, work.mask, work.inbits, res)) {
       uint8_t func_outer = (uint8_t)res[0];
@@ -471,6 +505,10 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
        with two gates to produce the desired map, add the gates, and return the ID of the one that
        produces the desired map. */
 
+    if (!check_num_gates_possible(st, 2, get_sat_metric(AND) + get_sat_metric(NOT))) {
+      return NO_GATE;
+    }
+
     for (int i = 0; i < st->num_gates; i++) {
       const gatenum gi = gate_order[i];
       ttable ti = st->gates[gi].table;
@@ -503,6 +541,10 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           return add_xnor_gate(st, gi, gk);
         }
       }
+    }
+
+    if (!check_num_gates_possible(st, 3, 2 * get_sat_metric(AND) + get_sat_metric(NOT))) {
+      return NO_GATE;
     }
 
     for (int i = 0; i < st->num_gates; i++) {
@@ -724,6 +766,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     gatenum nst_out;
     if (lut) {
       nst = *st;
+      nst.max_gates -= 1; /* A multiplexer will have to be added later. */
       gatenum fb = create_circuit(&nst, target, mask & ~fsel, next_inbits, andnot, true, randomize);
       if (fb == NO_GATE) {
         continue;
@@ -734,6 +777,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         continue;
       }
       assert(ttable_equals_mask(target, nst.gates[fc].table, mask & fsel));
+      nst.max_gates += 1;
 
       if (fb == fc) {
         nst_out = fb;
@@ -762,12 +806,20 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
     } else {
       state nst_and = *st; /* New state using AND multiplexer. */
+
+      /* A multiplexer will have to be added later. */
+      nst_and.max_gates -= 2;
+      nst_and.max_sat_metric -= get_sat_metric(AND) + get_sat_metric(XOR);
+
       gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits, andnot,
           false, randomize);
       gatenum mux_out_and = NO_GATE;
       if (fb != NO_GATE) {
         gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
             next_inbits, andnot, false, randomize);
+        /* Add back subtracted max from above. */
+        nst_and.max_gates += 2;
+        nst_and.max_sat_metric += get_sat_metric(AND) + get_sat_metric(XOR);
         gatenum andg = add_and_gate(&nst_and, fc, bit);
         mux_out_and = add_xor_gate(&nst_and, fb, andg);
         assert(mux_out_and == NO_GATE ||
@@ -779,12 +831,20 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         nst_or.max_gates = nst_and.num_gates;
         nst_or.max_sat_metric = nst_and.sat_metric;
       }
+
+      /* A multiplexer will have to be added later. */
+      nst_or.max_gates -= 2;
+      nst_or.max_sat_metric -= get_sat_metric(OR) + get_sat_metric(XOR);
+
       gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits, andnot, false,
           randomize);
       gatenum mux_out_or = NO_GATE;
       if (fd != NO_GATE) {
         gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
             next_inbits, andnot, false, randomize);
+        /* Add back subtracted max from above. */
+        nst_or.max_gates += 2;
+        nst_or.max_sat_metric += get_sat_metric(AND) + get_sat_metric(XOR);
         gatenum org = add_or_gate(&nst_or, fe, bit);
         mux_out_or = add_xor_gate(&nst_or, fd, org);
         assert(mux_out_or == NO_GATE ||
@@ -858,7 +918,9 @@ static void mpi_worker() {
     if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, work.inbits, res)) {
       continue;
     }
-    if (work.st.num_gates >= 7) {
+    bool search7;
+    MPI_Bcast(&search7, sizeof(search7), MPI_C_BOOL, 0, MPI_COMM_WORLD);
+    if (search7 && work.st.num_gates >= 7) {
       search_7lut(work.st, work.target, work.mask, work.inbits, res);
     }
   }
