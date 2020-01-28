@@ -5,7 +5,7 @@
    IACR Cryptology ePrint Archive 2000 (2000): 51. Improvements from
    SBOXDiscovery (https://github.com/DeepLearningJohnDoe/SBOXDiscovery) have been added.
 
-   Copyright (c) 2016-2017, 2019 Marcus Dansarie
+   Copyright (c) 2016-2017, 2019-2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
