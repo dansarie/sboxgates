@@ -2,7 +2,7 @@
 
    Functions for handling and search for LUTs.
 
-   Copyright (c) 2016-2017, 2019 Marcus Dansarie
+   Copyright (c) 2016-2017, 2019-2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -687,7 +687,7 @@ static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_re
     assert(*send_req == MPI_REQUEST_NULL);
     return false;
   }
-  MPI_Bcast(ret, 10, MPI_SHORT, *quit_msg, MPI_COMM_WORLD);
+  MPI_Bcast(ret, 10, MPI_UINT16_T, *quit_msg, MPI_COMM_WORLD);
   return true;
 }
 
