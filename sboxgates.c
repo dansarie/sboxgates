@@ -25,6 +25,7 @@
 #include <limits.h>
 #include <mpi.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -42,10 +43,11 @@ typedef struct {
   bool quit;
 } mpi_work;
 
-uint8_t g_sbox_enc[256];    /* Target S-box. */
+uint8_t g_sbox_enc[256];      /* Target S-box. */
 
-ttable g_target[8];       /* Truth tables for the output bits of the sbox. */
-metric g_metric = GATES;  /* Metric that should be used when selecting between two solutions. */
+ttable g_target[8];           /* Truth tables for the output bits of the sbox. */
+metric g_metric = GATES;      /* Metric that should be used when selecting between two solutions. */
+MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. */
 
 /* Returns true if the truth table is all-zero. */
 bool ttable_zero(ttable tt) {
@@ -423,7 +425,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     work.mask = mask;
     work.quit = false;
     memcpy(work.inbits, inbits, sizeof(uint8_t) * 8);
-    MPI_Bcast(&work, sizeof(work), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&work, 1, g_mpi_work_type, 0, MPI_COMM_WORLD);
 
     /* Look through all combinations of five gates in the circuit. For each combination, check if
        a combination of two of the possible 256 three bit Boolean functions as in
@@ -462,11 +464,11 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
     if (!check_num_gates_possible(st, 3, 0)) {
       bool search7 = false;
-      MPI_Bcast(&search7, sizeof(search7), MPI_C_BOOL, 0, MPI_COMM_WORLD);
+      MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
       return NO_GATE;
     }
     bool search7 = true;
-    MPI_Bcast(&search7, sizeof(search7), MPI_C_BOOL, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
 
     printf("[   0] Search 7.\n");
     if (work.st.num_gates >= 7 && search_7lut(work.st, work.target, work.mask, work.inbits, res)) {
@@ -910,7 +912,7 @@ static void mpi_worker() {
   uint16_t res[10];
   while (1) {
     mpi_work work;
-    MPI_Bcast(&work, sizeof(work), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&work, 1, g_mpi_work_type, 0, MPI_COMM_WORLD);
     if (work.quit) {
       return;
     }
@@ -919,7 +921,7 @@ static void mpi_worker() {
       continue;
     }
     bool search7;
-    MPI_Bcast(&search7, sizeof(search7), MPI_C_BOOL, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
     if (search7 && work.st.num_gates >= 7) {
       search_7lut(work.st, work.target, work.mask, work.inbits, res);
     }
@@ -1101,7 +1103,78 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
 static void stop_workers() {
   mpi_work work;
   work.quit = true;
-  MPI_Bcast(&work, sizeof(work), MPI_BYTE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&work, 1, g_mpi_work_type, 0, MPI_COMM_WORLD);
+}
+
+/* Called by main to create data types for structures passed between MPI instances. */
+void create_g_mpi_work_type() {
+  /* gate struct */
+  int gate_block_lengths[] = {4, 1, 1, 1, 1, 1};
+  MPI_Aint gate_displacements[] = {
+      offsetof(gate, table),
+      offsetof(gate, type),
+      offsetof(gate, in1),
+      offsetof(gate, in2),
+      offsetof(gate, in3),
+      offsetof(gate, function)
+    };
+  MPI_Datatype gate_datatypes[] = {
+      MPI_UINT64_T,
+      MPI_INT,
+      MPI_UINT16_T,
+      MPI_UINT16_T,
+      MPI_UINT16_T,
+      MPI_UINT8_T
+    };
+  MPI_Datatype gate_type;
+  assert(MPI_Type_create_struct(6, gate_block_lengths, gate_displacements, gate_datatypes,
+        &gate_type) == MPI_SUCCESS);
+  assert(MPI_Type_create_resized(gate_type, 0, sizeof(gate), &gate_type)
+      == MPI_SUCCESS);
+  assert(MPI_Type_commit(&gate_type) == MPI_SUCCESS);
+
+  /* state struct */
+  int state_block_lengths[] = {1, 1, 1, 1, 8, MAX_GATES};
+  MPI_Aint state_displacements[] = {
+      offsetof(state, max_sat_metric),
+      offsetof(state, sat_metric),
+      offsetof(state, max_gates),
+      offsetof(state, num_gates),
+      offsetof(state, outputs),
+      offsetof(state, gates)
+    };
+  MPI_Datatype state_datatypes[] = {
+      MPI_INT,
+      MPI_INT,
+      MPI_UINT16_T,
+      MPI_UINT16_T,
+      MPI_UINT16_T,
+      gate_type
+    };
+  MPI_Datatype state_type;
+  assert(MPI_Type_create_struct(6, state_block_lengths, state_displacements, state_datatypes,
+      &state_type) == MPI_SUCCESS);
+  assert(MPI_Type_commit(&state_type) == MPI_SUCCESS);
+
+  /* mpi_work struct*/
+  int work_block_lengths[] = {1, 4, 4, 8, 1};
+  MPI_Aint work_displacements[] = {
+      offsetof(mpi_work, st),
+      offsetof(mpi_work, target),
+      offsetof(mpi_work, mask),
+      offsetof(mpi_work, inbits),
+      offsetof(mpi_work, quit)
+    };
+  MPI_Datatype work_datatypes[] = {
+      state_type,
+      MPI_UINT64_T,
+      MPI_UINT64_T,
+      MPI_UINT8_T,
+      MPI_C_BOOL
+    };
+  assert(MPI_Type_create_struct(5, work_block_lengths, work_displacements, work_datatypes,
+      &g_mpi_work_type) == MPI_SUCCESS);
+  assert(MPI_Type_commit(&g_mpi_work_type) == MPI_SUCCESS);
 }
 
 int main(int argc, char **argv) {
@@ -1109,6 +1182,8 @@ int main(int argc, char **argv) {
   int rank, size;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
   MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  create_g_mpi_work_type();
 
   bool output_dot = false;
   bool output_c = false;
