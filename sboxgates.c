@@ -1410,7 +1410,12 @@ int main(int argc, char **argv) {
   }
 
   if (oneoutput != -1) {
-    generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput, st);
+    if (oneoutput >= get_num_outputs()) {
+      printf("Error: Can't generate output bit %d. Target S-box only has %d outputs.\n",
+          oneoutput, get_num_outputs());
+    } else {
+      generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput, st);
+    }
   } else {
     generate_graph(andnot, lut_graph, randomize, iterations, st);
   }
