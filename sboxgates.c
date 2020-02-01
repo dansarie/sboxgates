@@ -277,9 +277,9 @@ uint64_t xorshift1024() {
   if (!init) {
     FILE *rand_fp = fopen("/dev/urandom", "r");
     if (rand_fp == NULL) {
-      fprintf(stderr, "Error opening /dev/urandom.\n");
+      fprintf(stderr, "Error opening /dev/urandom. (sboxgates.c:%d)\n", __LINE__);
     } else if (fread(rand, 16 * sizeof(uint64_t), 1, rand_fp) != 1) {
-      fprintf(stderr, "Error reading from /dev/urandom.\n");
+      fprintf(stderr, "Error reading from /dev/urandom. (sboxgates.c:%d)\n", __LINE__);
       fclose(rand_fp);
     } else {
       init = true;
@@ -318,6 +318,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     gate_order[i] = st->num_gates - 1 - i;
   }
 
+  /* Randomize the gate search order. */
   if (randomize) {
     /* Fisher-Yates shuffle. */
     for (uint32_t i = st->num_gates - 1; i > 0; i--) {
@@ -1207,7 +1208,7 @@ int main(int argc, char **argv) {
     switch (c) {
       case 'b':
         if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long.\n");
+          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
           MPI_Finalize();
           return 1;
         }
@@ -1220,7 +1221,7 @@ int main(int argc, char **argv) {
         }
         output_c = true;
         if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long.\n");
+          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
           MPI_Finalize();
           return 1;
         }
@@ -1233,7 +1234,7 @@ int main(int argc, char **argv) {
         }
         output_dot = true;
         if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long.\n");
+          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
           MPI_Finalize();
           return 1;
         }
@@ -1241,7 +1242,7 @@ int main(int argc, char **argv) {
         break;
       case 'g':
         if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long.\n");
+          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
           MPI_Finalize();
           return 1;
         }
@@ -1269,7 +1270,7 @@ int main(int argc, char **argv) {
       case 'i':
         iterations = atoi(optarg);
         if (iterations < 1) {
-          fprintf(stderr, "Bad iterations value: %s\n", optarg);
+          fprintf(stderr, "Bad iterations value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
         }
         break;
       case 'l':
@@ -1281,7 +1282,7 @@ int main(int argc, char **argv) {
       case 'o':
         oneoutput = atoi(optarg);
         if (oneoutput < 0 || oneoutput > 7) {
-          fprintf(stderr, "Bad output value: %s\n", optarg);
+          fprintf(stderr, "Bad output value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
           MPI_Finalize();
           return 1;
         }
@@ -1289,7 +1290,7 @@ int main(int argc, char **argv) {
       case 'p':
         permute = atoi(optarg);
         if (permute < 0 || permute > 255) {
-          fprintf(stderr, "Bad permutation value: %s\n", optarg);
+          fprintf(stderr, "Bad permutation value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
           MPI_Finalize();
           return 1;
         }
@@ -1304,13 +1305,14 @@ int main(int argc, char **argv) {
   }
 
   if (output_c && output_dot) {
-    fprintf(stderr, "Cannot combine c and d options.\n");
+    fprintf(stderr, "Cannot combine c and d options. (sboxgates.c:%d)\n", __LINE__);
     MPI_Finalize();
     return 1;
   }
 
   if (lut_graph && g_metric == SAT) {
-    fprintf(stderr, "SAT metric can not be combined with LUT graph generation.\n");
+    fprintf(stderr, "SAT metric can not be combined with LUT graph generation. (sboxgates.c:%d)\n",
+        __LINE__);
     MPI_Finalize();
     return 1;
   }
@@ -1318,7 +1320,7 @@ int main(int argc, char **argv) {
   if (output_c || output_dot) {
     state st;
     if (!load_state(fname, &st)) {
-      fprintf(stderr, "Error when reading state file.\n");
+      fprintf(stderr, "Error when reading state file. (sboxgates.c:%d)\n", __LINE__);
       MPI_Finalize();
       return 1;
     }
@@ -1341,7 +1343,7 @@ int main(int argc, char **argv) {
   }
 
   if (strlen(sboxfname) == 0) {
-    fprintf(stderr, "No target S-box file name argument.\n");
+    fprintf(stderr, "No target S-box file name argument. (sboxgates.c:%d)\n", __LINE__);
     stop_workers();
     return 1;
   }
@@ -1354,7 +1356,7 @@ int main(int argc, char **argv) {
   uint32_t num_outputs = 0;
   FILE *sboxfp = fopen(sboxfname, "r");
   if (sboxfp == NULL) {
-    fprintf(stderr, "Error when opening target S-box file.\n");
+    fprintf(stderr, "Error when opening target S-box file. (sboxgates.c:%d)\n", __LINE__);
     stop_workers();
     return 1;
   }
@@ -1364,7 +1366,7 @@ int main(int argc, char **argv) {
   }
   fclose(sboxfp);
   if (__builtin_popcount(sbox_inp) != 1) {
-    fprintf(stderr, "Bad number of items in target S-box.\n");
+    fprintf(stderr, "Bad number of items in target S-box. (sboxgates.c:%d)\n", __LINE__);
     stop_workers();
     return 1;
   }

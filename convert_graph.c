@@ -3,7 +3,7 @@
    Helper functions for converting generated graphs to C/CUDA code or Graphviz dot format for
    visualization.
 
-   Copyright (c) 2016-2017, 2019 Marcus Dansarie
+   Copyright (c) 2016-2017, 2019-2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -133,7 +133,7 @@ bool print_c_function(const state st) {
     }
   }
   if (num_outputs <= 0) {
-    fprintf(stderr, "Error: no output gates in circuit.\n");
+    fprintf(stderr, "Error: no output gates in circuit. (convert_graph.c:%d)\n", __LINE__);
     return false;
   }
   bool ptr_ret = num_outputs > 1;
