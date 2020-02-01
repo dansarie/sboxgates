@@ -2,7 +2,7 @@
 
    Function definitions for state.h.
 
-   Copyright (c) 2016-2017 Marcus Dansarie
+   Copyright (c) 2016-2017, 2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -56,7 +56,7 @@ typedef struct {
   gate gates[MAX_GATES];
 } state;
 
-/* Saves the state st to a file named O-GGG-MMMM-NNNNNNNN-FFFFFFFF.state, where
+/* Saves the state st to a file named O-GGG-MMMM-NNNNNNNN-FFFFFFFF.xml, where
    O        is the number of output Boolean functions in the circuit;
    GGG      is the number of gates in the circuit;
    MMMM     is the value of the SAT metric for the circuit;
@@ -69,7 +69,7 @@ void save_state(state st);
  * gate type will cause an assertion to fail. */
 int get_sat_metric(gate_type type);
 
-/* Loads a saved state from a file. Returns true if successful and false otherwise.
+/* Loads a saved state from an XML file. Returns true if successful and false otherwise.
    name  is the file name to load the file from.
    state is a pointer to an allocted state struct that should be updated with the loaded state. */
 bool load_state(const char *name, state *return_state);

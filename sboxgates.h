@@ -1,6 +1,6 @@
 /* sboxgates.h
 
-   Copyright (c) 2019 Marcus Dansarie
+   Copyright (c) 2019-2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -31,5 +31,9 @@ int get_num_inputs(const state *st);
 
 /* Generates pseudorandom 64 bit strings. Used for randomizing the search process. */
 uint64_t xorshift1024();
+
+/* If sbox is true, a target truth table for the given bit of the sbox is generated.
+   If sbox is false, the truth table of the given input bit is generated. */
+ttable generate_target(uint8_t bit, bool sbox);
 
 #endif /* __SBOXGATES_H__ */

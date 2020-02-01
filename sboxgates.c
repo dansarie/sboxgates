@@ -930,7 +930,7 @@ static void mpi_worker() {
 
 /* If sbox is true, a target truth table for the given bit of the sbox is generated.
    If sbox is false, the truth table of the given input bit is generated. */
-static ttable generate_target(uint8_t bit, bool sbox) {
+ttable generate_target(uint8_t bit, bool sbox) {
   assert(bit < 8);
   uint64_t vec[] = {0, 0, 0, 0};
   uint64_t *var = &vec[0];

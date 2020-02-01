@@ -1,6 +1,6 @@
 # CMakeLists.txt
 #
-# Copyright (c) 2019 Marcus Dansarie
+# Copyright (c) 2019-2020 Marcus Dansarie
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -20,11 +20,12 @@ cmake_minimum_required (VERSION 3.10)
 project(SBOXGATES VERSION 1.0.0 LANGUAGES C)
 
 find_package(MPI REQUIRED)
-find_library(MSGPACK_LIBRARY msgpackc)
+find_package(LibXml2 REQUIRED)
 
 add_executable(sboxgates convert_graph.c lut.c sboxgates.c state.c)
+include_directories(${LIBXML2_INCLUDE_DIR})
 target_include_directories(sboxgates PRIVATE ${MPI_C_INCLUDE_PATH})
-target_link_libraries(sboxgates ${MPI_C_LIBRARIES} ${MPI_C_LINK_FLAGS} ${MSGPACK_LIBRARY})
+target_link_libraries(sboxgates ${MPI_C_LIBRARIES} ${MPI_C_LINK_FLAGS} ${LIBXML2_LIBRARIES})
 
 set(CMAKE_C_FLAGS "-march=native -Ofast -g -Wall -Wpedantic")
 

@@ -3,7 +3,7 @@
    Helper functions for saving and loading files containing logic circuit
    representations of S-boxes created by sboxgates.
 
-   Copyright (c) 2016-2017 Marcus Dansarie
+   Copyright (c) 2016-2017, 2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,14 +18,14 @@
    You should have received a copy of the GNU General Public License
    along with this program. If not, see <http://www.gnu.org/licenses/>. */
 
-#define MSGPACK_FORMAT_VERSION 2
 #include <assert.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
 #include <limits.h>
-#include <msgpack.h>
-#include <msgpack/fbuffer.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include "lut.h"
 #include "sboxgates.h"
 #include "state.h"
 
@@ -97,51 +97,71 @@ void save_state(state st) {
   }
 
   char name[40];
-  assert(snprintf(name, 40, "%d-%03d-%04d-%s-%08x.state", num_outputs,
+  assert(snprintf(name, 40, "%d-%03d-%04d-%s-%08x.xml", num_outputs,
     st.num_gates - get_num_inputs(&st), st.sat_metric, out, state_fingerprint(st)) < 40);
 
   FILE *fp = fopen(name, "w");
   if (fp == NULL) {
-    fprintf(stderr, "Error opening file for writing.\n");
+    fprintf(stderr, "Error opening file for writing. (state.c:%d)\n", __LINE__);
     return;
   }
-  msgpack_packer pk;
-  msgpack_packer_init(&pk, fp, msgpack_fbuffer_write);
-  msgpack_pack_int(&pk, MSGPACK_FORMAT_VERSION);
-  msgpack_pack_int(&pk, 8); /* Number of inputs. */
-  msgpack_pack_array(&pk, 8); /* Number of outputs. */
-  for (int i = 0; i < 8; i++) {
-    msgpack_pack_int(&pk, st.outputs[i]);
-  }
-  msgpack_pack_array(&pk, st.num_gates * 6);
-  for (int i = 0; i < st.num_gates; i++) {
-    msgpack_pack_bin(&pk, 32);
-    msgpack_pack_bin_body(&pk, &st.gates[i].table, 32);
-    msgpack_pack_int(&pk, st.gates[i].type);
-    msgpack_pack_int(&pk, st.gates[i].in1);
-    msgpack_pack_int(&pk, st.gates[i].in2);
-    msgpack_pack_int(&pk, st.gates[i].in3);
-    msgpack_pack_int(&pk, st.gates[i].function);
-  }
-  fclose(fp);
-}
 
-static int unpack_int(msgpack_unpacker *unp, int *ret) {
-  assert(ret != NULL);
-  if (unp == NULL) {
-    return false;
+  fprintf(fp, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
+  fprintf(fp, "<gates>\n");
+  for (int i = 0; i < 8; i++) {
+    if (st.outputs[i] != NO_GATE) {
+      fprintf(fp, "  <output bit=\"%d\" gate=\"%d\" />\n", i, st.outputs[i]);
+    }
   }
-  msgpack_unpacked und;
-  msgpack_unpacked_init(&und);
-  if (msgpack_unpacker_next(unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || (und.data.type != MSGPACK_OBJECT_POSITIVE_INTEGER
-          && und.data.type != MSGPACK_OBJECT_NEGATIVE_INTEGER)) {
-    msgpack_unpacked_destroy(&und);
-    return false;
+  for (int i = 0; i < st.num_gates; i++) {
+    char *type = NULL;
+    switch (st.gates[i].type) {
+      case IN:
+        type = "IN";
+        break;
+      case NOT:
+        type = "NOT";
+        break;
+      case AND:
+        type = "AND";
+        break;
+      case OR:
+        type = "OR";
+        break;
+      case XOR:
+        type = "XOR";
+        break;
+      case ANDNOT:
+        type = "ANDNOT";
+        break;
+      case LUT:
+        type = "LUT";
+        break;
+      default:
+        assert(0);
+    }
+    if (st.gates[i].type == IN) {
+      fprintf(fp, "  <gate type=\"IN\" />\n");
+    } else {
+      if (st.gates[i].type == LUT) {
+        fprintf(fp, "  <gate type=\"LUT\" function=\"%02x\">\n", st.gates[i].function);
+      } else {
+        fprintf(fp, "  <gate type=\"%s\">\n", type);
+      }
+      if (st.gates[i].in1 != NO_GATE) {
+        fprintf(fp, "    <input gate=\"%d\" />\n", st.gates[i].in1);
+      }
+      if (st.gates[i].in2 != NO_GATE) {
+        fprintf(fp, "    <input gate=\"%d\" />\n", st.gates[i].in2);
+      }
+      if (st.gates[i].in3 != NO_GATE) {
+        fprintf(fp, "    <input gate=\"%d\" />\n", st.gates[i].in3);
+      }
+      fprintf(fp, "  </gate>\n");
+    }
   }
-  *ret = und.data.via.i64;
-  msgpack_unpacked_destroy(&und);
-  return true;
+  fprintf(fp, "</gates>\n");
+  fclose(fp);
 }
 
 /* Returns the SAT metric of the specified gate type. Calling this with the LUT
@@ -165,141 +185,156 @@ int get_sat_metric(gate_type type) {
   return 0;
 }
 
+#define LOAD_STATE_RETURN_ON_ERROR(X)\
+  if (X) {\
+    fprintf(stderr, "Error when parsing XML document. (state.c:%d)\n", __LINE__);\
+    if (doc != NULL) xmlFreeDoc(doc);\
+    return false;\
+  }
+
 /* Loads a saved state */
 bool load_state(const char *name, state *return_state) {
   assert(name != NULL);
   assert(return_state != NULL);
-  FILE *fp = fopen(name, "r");
-  if (fp == NULL) {
-    fprintf(stderr, "Error opening file: %s\n", name);
-    return false;
-  }
-  fseek(fp, 0, SEEK_END);
-  size_t fsize = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
-  msgpack_unpacker unp;
-  if (!msgpack_unpacker_init(&unp, fsize)) {
-    fclose(fp);
-    return false;
-  }
-  if (msgpack_unpacker_buffer_capacity(&unp) < fsize) {
-    if (!msgpack_unpacker_reserve_buffer(&unp, fsize)) {
-      fclose(fp);
-      msgpack_unpacker_destroy(&unp);
-      return false;
+
+  xmlDocPtr doc = xmlParseFile(name);
+  LOAD_STATE_RETURN_ON_ERROR(doc == NULL);
+
+  /* Get gates. */
+  xmlNodePtr gates = NULL;
+  for (xmlNodePtr ptr = doc->children; ptr != NULL; ptr = ptr->next) {
+    if (strcmp((char*)ptr->name, "gates") == 0) {
+      gates = ptr;
+      break;
     }
   }
-  if (fread(msgpack_unpacker_buffer(&unp), fsize, 1, fp) != 1) {
-    fclose(fp);
-    msgpack_unpacker_destroy(&unp);
-    return false;
-  }
-  fclose(fp);
-  fp = NULL;
-  msgpack_unpacker_buffer_consumed(&unp, fsize);
-
-  int format_version;
-  int num_inputs;
-  if (!unpack_int(&unp, &format_version)
-      || !unpack_int(&unp, &num_inputs)
-      || format_version != MSGPACK_FORMAT_VERSION
-      || num_inputs != 8) {
-    msgpack_unpacker_destroy(&unp);
-    return false;
-  }
-
-  msgpack_unpacked und;
-
-  msgpack_unpacked_init(&und);
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_ARRAY) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return false;
-  }
-  int num_outputs = und.data.via.array.size;
-  if (num_outputs != 8) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return false;
-  }
-
-  gatenum outputs[8];
-  for (int i = 0; i < 8; i++) {
-    if (und.data.via.array.ptr[i].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-      msgpack_unpacked_destroy(&und);
-      msgpack_unpacker_destroy(&unp);
-      return false;
-    }
-    outputs[i] = und.data.via.array.ptr[i].via.i64;
-  }
-  msgpack_unpacked_destroy(&und);
-  msgpack_unpacked_init(&und);
-
-  if (msgpack_unpacker_next(&unp, &und) != MSGPACK_UNPACK_SUCCESS
-      || und.data.type != MSGPACK_OBJECT_ARRAY) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return false;
-  }
-  int arraysize = und.data.via.array.size;
-
-  if (arraysize % 6 != 0 || arraysize / 6 > MAX_GATES) {
-    msgpack_unpacked_destroy(&und);
-    msgpack_unpacker_destroy(&unp);
-    return false;
-  }
-  for (int i = 0; i < 8; i++) {
-    if (outputs[i] >= arraysize / 6 && outputs[i] != NO_GATE) {
-      msgpack_unpacked_destroy(&und);
-      msgpack_unpacker_destroy(&unp);
-      return false;
-    }
-  }
+  LOAD_STATE_RETURN_ON_ERROR(gates == NULL);
 
   state st;
-  st.max_sat_metric = INT_MAX;
-  st.sat_metric = 0;
+  memset(&st, 0, sizeof(state));
   st.max_gates = MAX_GATES;
-  st.num_gates = arraysize / 6;
-  memcpy(st.outputs, outputs, 8 * sizeof(gatenum));
-
-  for (int i = 0; i < st.num_gates; i++) {
-    if (und.data.via.array.ptr[i * 6].type != MSGPACK_OBJECT_BIN
-        || und.data.via.array.ptr[i * 6].via.bin.size != 32
-        || und.data.via.array.ptr[i * 6 + 1].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-        || und.data.via.array.ptr[i * 6 + 2].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-        || und.data.via.array.ptr[i * 6 + 3].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-        || und.data.via.array.ptr[i * 6 + 4].type != MSGPACK_OBJECT_POSITIVE_INTEGER
-        || und.data.via.array.ptr[i * 6 + 5].type != MSGPACK_OBJECT_POSITIVE_INTEGER) {
-      msgpack_unpacked_destroy(&und);
-      msgpack_unpacker_destroy(&unp);
-      return false;
-    }
-    memcpy(&st.gates[i].table, und.data.via.array.ptr[i * 6].via.bin.ptr, 32);
-    st.gates[i].type = und.data.via.array.ptr[i * 6 + 1].via.i64;
-    st.gates[i].in1 = und.data.via.array.ptr[i * 6 + 2].via.i64;
-    st.gates[i].in2 = und.data.via.array.ptr[i * 6 + 3].via.i64;
-    st.gates[i].in3 = und.data.via.array.ptr[i * 6 + 4].via.i64;
-    st.gates[i].function = und.data.via.array.ptr[i * 6 + 5].via.i64;
-    if (st.gates[i].type > LUT
-        || st.gates[i].type < IN
-        || (st.gates[i].type == IN && i >= 8)
-        || (st.gates[i].type == IN && st.gates[i].in1 != NO_GATE)
-        || (st.gates[i].type != IN && st.gates[i].in1 == NO_GATE)
-        || ((st.gates[i].type == IN || st.gates[i].type == NOT) && st.gates[i].in2 != NO_GATE)
-        || (st.gates[i].type != IN && st.gates[i].type != NOT && st.gates[i].in2 == NO_GATE)
-        || (st.gates[i].type != LUT && st.gates[i].in3 != NO_GATE)
-        || (st.gates[i].type == LUT && st.gates[i].in3 == NO_GATE)
-        || (st.gates[i].type != LUT && st.gates[i].function != 0)
-        || (st.gates[i].in1 != NO_GATE && st.gates[i].in1 >= st.num_gates)
-        || (st.gates[i].in2 != NO_GATE && st.gates[i].in2 >= st.num_gates)
-        || (st.gates[i].in3 != NO_GATE && st.gates[i].in3 >= st.num_gates)) {
-      msgpack_unpacked_destroy(&und);
-      msgpack_unpacker_destroy(&unp);
-      return false;
-    }
+  for (int i = 0; i < 8; i++) {
+    st.outputs[i] = NO_GATE;
   }
+
+  /* Parse gates. */
+  for (xmlNodePtr gate = gates->children; gate != NULL; gate = gate->next) {
+    if (strcmp((char*)gate->name, "gate") != 0) {
+      continue;
+    }
+
+    /* Parse type enum. */
+    char *typestr = (char*)xmlGetProp(gate, (xmlChar*)"type");
+    LOAD_STATE_RETURN_ON_ERROR(typestr == NULL);
+    gate_type type;
+    if (strcmp(typestr, "IN") == 0) {
+      type = IN;
+    } else if (strcmp(typestr, "NOT") == 0) {
+      type = NOT;
+    } else if (strcmp(typestr, "AND") == 0) {
+      type = AND;
+    } else if (strcmp(typestr, "OR") == 0) {
+      type = OR;
+    } else if (strcmp(typestr, "ANDNOT") == 0) {
+      type = ANDNOT;
+    } else if (strcmp(typestr, "XOR") == 0) {
+      type = XOR;
+    } else if (strcmp(typestr, "LUT") == 0) {
+      type = LUT;
+    } else {
+      xmlFree(typestr);
+      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+    }
+    xmlFree(typestr);
+    typestr = NULL;
+
+    /* Parse LUT function. */
+    long func = 0;
+    char *funcstr = (char*)xmlGetProp(gate, (xmlChar*)"function");
+    if (funcstr != NULL) {
+      func = strtol(funcstr, NULL, 16);
+      xmlFree(funcstr);
+      funcstr = NULL;
+      LOAD_STATE_RETURN_ON_ERROR(func <= 0 || func > 255);
+    }
+    /* Error if function is set for gate types other than LUT. */
+    LOAD_STATE_RETURN_ON_ERROR(type != LUT && func != 0);
+
+    /* Parse input gates. */
+    int inp = 0;
+    gatenum inputs[] = {NO_GATE, NO_GATE, NO_GATE};
+    for (xmlNodePtr input = gate->children; input != NULL; input = input->next) {
+      if (strcmp((char*)input->name, "input") != 0) {
+        continue;
+      }
+      char *gatestr = (char*)xmlGetProp(input, (xmlChar*)"gate");
+      int gatenum = atoi(gatestr);
+      xmlFree(gatestr);
+      gatestr = NULL;
+      LOAD_STATE_RETURN_ON_ERROR(gatenum < 0 || gatenum >= st.num_gates);
+      inputs[inp++] = gatenum;
+    }
+
+    ttable table;
+    if (type == IN) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 0);
+      LOAD_STATE_RETURN_ON_ERROR(st.num_gates >= 8);
+      LOAD_STATE_RETURN_ON_ERROR(st.num_gates != 0 && st.gates[st.num_gates - 1].type != IN);
+      table = generate_target(st.num_gates, false);
+    } else if (type == NOT) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 1);
+      table = ~st.gates[inputs[0]].table;
+    } else if (type == AND) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      table = st.gates[inputs[0]].table & st.gates[inputs[1]].table;
+    } else if (type == OR) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      table = st.gates[inputs[0]].table | st.gates[inputs[1]].table;
+    } else if (type == ANDNOT) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      table = ~st.gates[inputs[0]].table & st.gates[inputs[1]].table;
+    } else if (type == XOR) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      table = st.gates[inputs[0]].table ^ st.gates[inputs[1]].table;
+    } else if (type == LUT) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 3);
+      table = generate_lut_ttable(func, st.gates[inputs[0]].table, st.gates[inputs[1]].table,
+          st.gates[inputs[2]].table);
+    } else {
+      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+    }
+
+    st.gates[st.num_gates].table = table;
+    st.gates[st.num_gates].type = type;
+    st.gates[st.num_gates].in1 = inputs[0];
+    st.gates[st.num_gates].in2 = inputs[1];
+    st.gates[st.num_gates].in3 = inputs[2];
+    st.gates[st.num_gates].function = (uint8_t)func;
+    st.num_gates += 1;
+  }
+
+  /* Parse outputs. */
+  for (xmlNodePtr output = gates->children; output != NULL; output = output->next) {
+    if (strcmp((char*)output->name, "output") != 0) {
+      continue;
+    }
+    char *bitstr = (char*)xmlGetProp(output, (xmlChar*)"bit");
+    int bit = atoi(bitstr);
+    xmlFree(bitstr);
+    bitstr = NULL;
+    LOAD_STATE_RETURN_ON_ERROR(bit < 0 || bit >= 8);
+    LOAD_STATE_RETURN_ON_ERROR(st.outputs[bit] != NO_GATE);
+
+    char *gatestr = (char*)xmlGetProp(output, (xmlChar*)"gate");
+    int gate = atoi(gatestr);
+    xmlFree(gatestr);
+    gatestr = NULL;
+    LOAD_STATE_RETURN_ON_ERROR(gate < 0 || gate >= st.num_gates);
+
+    st.outputs[bit] = gate;
+  }
+
+  xmlFreeDoc(doc);
 
   /* Calculate SAT metric. */
   for (int i = 0; i < st.num_gates; i++) {
@@ -310,8 +345,7 @@ bool load_state(const char *name, state *return_state) {
     st.sat_metric += get_sat_metric(st.gates[i].type);
   }
 
-  msgpack_unpacked_destroy(&und);
-  msgpack_unpacker_destroy(&unp);
   *return_state = st;
+
   return true;
 }

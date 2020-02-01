@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+
+<!-- gates.xsd
+
+     Schema definition for sboxgates state files.
+
+     Copyright (c) 2020 Marcus Dansarie
+
+     This program is free software: you can redistribute it and/or modify
+     it under the terms of the GNU General Public License as published by
+     the Free Software Foundation, either version 3 of the License, or
+     (at your option) any later version.
+
+     This program is distributed in the hope that it will be useful,
+     but WITHOUT ANY WARRANTY; without even the implied warranty of
+     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+     GNU General Public License for more details.
+
+     You should have received a copy of the GNU General Public License
+     along with this program. If not, see <http://www.gnu.org/licenses/>. -->
+
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+
+  <xs:simpleType name="gate_type_type">
+    <xs:restriction base="xs:string">
+      <xs:minLength value="1" />
+      <xs:enumeration value="IN" />
+      <xs:enumeration value="NOT" />
+      <xs:enumeration value="AND" />
+      <xs:enumeration value="OR" />
+      <xs:enumeration value="XOR" />
+      <xs:enumeration value="ANDNOT" />
+      <xs:enumeration value="LUT" />
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="gatenum_type">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:maxExclusive value="500" />
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="function_type">
+    <xs:restriction base="xs:hexBinary">
+      <xs:length value="1" />
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="bit_type">
+    <xs:restriction base="xs:nonNegativeInteger">
+      <xs:maxExclusive value="8" />
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:complexType name="input_type">
+    <xs:attribute name="gate" type="gatenum_type" use="required" />
+  </xs:complexType>
+
+  <xs:complexType name="output_type">
+    <xs:attribute name="bit" type="bit_type" use="required" />
+    <xs:attribute name="gate" type="gatenum_type" use="required" />
+  </xs:complexType>
+
+  <xs:complexType name="gate_type">
+    <xs:sequence>
+      <xs:element name="input" type="input_type" minOccurs="0" maxOccurs="3" />
+    </xs:sequence>
+    <xs:attribute name="type" type="gate_type_type" use="required" />
+    <xs:attribute name="function" type="function_type" />
+  </xs:complexType>
+
+  <xs:complexType name="state">
+    <xs:sequence>
+      <xs:element name="output" type="output_type" minOccurs="1" maxOccurs="8" />
+      <xs:element name="gate" type="gate_type" minOccurs="1" maxOccurs="500" />
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:element name="gates" type="state" />
+
+</xs:schema>

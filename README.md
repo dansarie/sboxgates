@@ -14,14 +14,14 @@ use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 ## Dependencies
 
 * [CMake](https://github.com/Kitware/CMake) (for build)
+* [libxml2](https://github.com/GNOME/libxml2)
 * MPI
-* [msgpack](https://github.com/msgpack/msgpack-c)
 * [Graphviz](https://github.com/ellson/graphviz) (for generating visual representations)
 
 ## Build
 
 ```
-sudo apt-get install libmsgpack-dev libopenmpi-dev openmpi-bin
+sudo apt-get install libxml2-dev libopenmpi-dev openmpi-bin
 mkdir build
 cd build
 cmake ..
@@ -44,12 +44,12 @@ mpirun ./sboxgates -l -o 0 -b sboxes/rijndael.txt
 
 Visualize a generated circuit with Graphwiz:
 ```
-./sboxgates -d 1-067-162-3-c32281db.state | dot -Tpng > 1-067-162-3-c32281db.png
+./sboxgates -d 1-067-162-3-c32281db.xml | dot -Tpng > 1-067-162-3-c32281db.png
 ```
 
 Convert a generated circuit to C/CUDA:
 ```
-./sboxgates -c 1-067-162-3-c32281db.state > 1-067-162-3-c32281db.c
+./sboxgates -c 1-067-162-3-c32281db.xml > 1-067-162-3-c32281db.c
 ```
 
 ## License
