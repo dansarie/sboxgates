@@ -46,7 +46,6 @@ typedef struct {
 uint8_t g_sbox_enc[256];      /* Target S-box. */
 
 ttable g_target[8];           /* Truth tables for the output bits of the sbox. */
-metric g_metric = GATES;      /* Metric that should be used when selecting between two solutions. */
 MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. */
 
 /* Returns true if the truth table is all-zero. */
@@ -72,11 +71,11 @@ bool ttable_equals_mask(const ttable in1, const ttable in2, const ttable mask) {
 /* Adds a gate to the state st. Returns the gate id of the added gate. If an input gate is
    equal to NO_GATE (only gid1 in case of a NOT gate), NO_GATE will be returned. */
 static inline gatenum add_gate(state *st, gate_type type, ttable table, gatenum gid1,
-    gatenum gid2) {
+    gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT) || st->num_gates > st->max_gates) {
     return NO_GATE;
   }
-  if (g_metric == SAT && st->sat_metric > st->max_sat_metric) {
+  if (opt->metric == SAT && st->sat_metric > st->max_sat_metric) {
     return NO_GATE;
   }
   assert(type != IN && type != LUT);
@@ -120,129 +119,145 @@ static inline gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid
 
 /* The functions below are all calls to add_gate above added to improve code readability. */
 
-static inline gatenum add_not_gate(state *st, gatenum gid) {
+static inline gatenum add_not_gate(state *st, gatenum gid, const options *opt) {
   if (gid == NO_GATE) {
     return NO_GATE;
   }
-  return add_gate(st, NOT, ~st->gates[gid].table, gid, NO_GATE);
+  return add_gate(st, NOT, ~st->gates[gid].table, gid, NO_GATE, opt);
 }
 
-static inline gatenum add_and_gate(state *st, gatenum gid1, gatenum gid2) {
+static inline gatenum add_and_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
   if (gid1 == gid2) {
     return gid1;
   }
-  return add_gate(st, AND, st->gates[gid1].table & st->gates[gid2].table, gid1, gid2);
+  return add_gate(st, AND, st->gates[gid1].table & st->gates[gid2].table, gid1, gid2, opt);
 }
 
-static inline gatenum add_or_gate(state *st, gatenum gid1, gatenum gid2) {
+static inline gatenum add_or_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
   if (gid1 == gid2) {
     return gid1;
   }
-  return add_gate(st, OR, st->gates[gid1].table | st->gates[gid2].table, gid1, gid2);
+  return add_gate(st, OR, st->gates[gid1].table | st->gates[gid2].table, gid1, gid2, opt);
 }
 
-static inline gatenum add_xor_gate(state *st, gatenum gid1, gatenum gid2) {
+static inline gatenum add_xor_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
-  return add_gate(st, XOR, st->gates[gid1].table ^ st->gates[gid2].table, gid1, gid2);
+  return add_gate(st, XOR, st->gates[gid1].table ^ st->gates[gid2].table, gid1, gid2, opt);
 }
 
-static inline gatenum add_andnot_gate(state *st, gatenum gid1, gatenum gid2) {
+static inline gatenum add_andnot_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
-  return add_gate(st, ANDNOT, ~st->gates[gid1].table & st->gates[gid2].table, gid1, gid2);
+  return add_gate(st, ANDNOT, ~st->gates[gid1].table & st->gates[gid2].table, gid1, gid2, opt);
 }
 
-static inline gatenum add_nand_gate(state *st, gatenum gid1, gatenum gid2) {
-  return add_not_gate(st, add_and_gate(st, gid1, gid2));
+static inline gatenum add_nand_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+  return add_not_gate(st, add_and_gate(st, gid1, gid2, opt), opt);
 }
 
-static inline gatenum add_nor_gate(state *st, gatenum gid1, gatenum gid2) {
-  return add_not_gate(st, add_or_gate(st, gid1, gid2));
+static inline gatenum add_nor_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+  return add_not_gate(st, add_or_gate(st, gid1, gid2, opt), opt);
 }
 
-static inline gatenum add_xnor_gate(state *st, gatenum gid1, gatenum gid2) {
-  return add_not_gate(st, add_xor_gate(st, gid1, gid2));
+static inline gatenum add_xnor_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+  return add_not_gate(st, add_xor_gate(st, gid1, gid2, opt), opt);
 }
 
-static inline gatenum add_or_not_gate(state *st, gatenum gid1, gatenum gid2) {
-  return add_or_gate(st, add_not_gate(st, gid1), gid2);
+static inline gatenum add_or_not_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+  return add_or_gate(st, add_not_gate(st, gid1, opt), gid2, opt);
 }
 
-static inline gatenum add_and_not_gate(state *st, gatenum gid1, gatenum gid2) {
-  return add_and_gate(st, add_not_gate(st, gid1), gid2);
+static inline gatenum add_and_not_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+  return add_and_gate(st, add_not_gate(st, gid1, opt), gid2, opt);
 }
 
-static inline gatenum add_or_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_or_gate(st, add_or_gate(st, gid1, gid2), gid3);
+static inline gatenum add_or_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_or_gate(st, add_or_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_and_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_and_gate(st, add_and_gate(st, gid1, gid2), gid3);
+static inline gatenum add_and_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_and_gate(st, add_and_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_xor_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_xor_gate(st, add_xor_gate(st, gid1, gid2), gid3);
+static inline gatenum add_xor_3_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_xor_gate(st, add_xor_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_and_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_or_gate(st, add_and_gate(st, gid1, gid2), gid3);
+static inline gatenum add_and_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_or_gate(st, add_and_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_and_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_xor_gate(st, add_and_gate(st, gid1, gid2), gid3);
+static inline gatenum add_and_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_xor_gate(st, add_and_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_xor_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_or_gate(st, add_xor_gate(st, gid1, gid2), gid3);
+static inline gatenum add_xor_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_or_gate(st, add_xor_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_xor_and_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_and_gate(st, add_xor_gate(st, gid1, gid2), gid3);
+static inline gatenum add_xor_and_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_and_gate(st, add_xor_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_or_and_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_and_gate(st, add_or_gate(st, gid1, gid2), gid3);
+static inline gatenum add_or_and_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_and_gate(st, add_or_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_or_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_xor_gate(st, add_or_gate(st, gid1, gid2), gid3);
+static inline gatenum add_or_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_xor_gate(st, add_or_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_andnot_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_or_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
+static inline gatenum add_andnot_or_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_or_gate(st, add_andnot_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_xor_andnot_a_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_andnot_gate(st, gid3, add_xor_gate(st, gid1, gid2));
+static inline gatenum add_xor_andnot_a_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_andnot_gate(st, gid3, add_xor_gate(st, gid1, gid2, opt), opt);
 }
 
-static inline gatenum add_xor_andnot_b_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_andnot_gate(st, add_xor_gate(st, gid1, gid2), gid3);
+static inline gatenum add_xor_andnot_b_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_andnot_gate(st, add_xor_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_and_andnot_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_and_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
+static inline gatenum add_and_andnot_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_and_gate(st, add_andnot_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_andnot_3_a_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_andnot_gate(st, gid1, add_andnot_gate(st, gid2, gid3));
+static inline gatenum add_andnot_3_a_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_andnot_gate(st, gid1, add_andnot_gate(st, gid2, gid3, opt), opt);
 }
 
-static inline gatenum add_andnot_3_b_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_andnot_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
+static inline gatenum add_andnot_3_b_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_andnot_gate(st, add_andnot_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
-static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3) {
-  return add_xor_gate(st, add_andnot_gate(st, gid1, gid2), gid3);
+static inline gatenum add_andnot_xor_gate(state *st, gatenum gid1, gatenum gid2, gatenum gid3,
+    const options *opt) {
+  return add_xor_gate(st, add_andnot_gate(st, gid1, gid2, opt), gid3, opt);
 }
 
 /* Returns the number of input gates in the state. */
@@ -295,11 +310,11 @@ uint64_t xorshift1024() {
 }
 
 /* Used in create_circuit to check if any solutions with smaller metric are possible. Uses either
-   the add or the add_sat parameter depending on the current metric in use according to the
-   g_metric global variable. Returns true if a solution with the provided metric is possible with
-   respect to the value of st->max_gates or st->max_sat_metric. */
-static bool check_num_gates_possible(state *st, int add, int add_sat) {
-  if (g_metric == SAT && st->sat_metric + add_sat > st->max_sat_metric) {
+   the add or the add_sat parameter depending on the current metric in use. Returns true if a
+   solution with the provided metric is possible with respect to the value of st->max_gates or
+   st->max_sat_metric. */
+static bool check_num_gates_possible(state *st, int add, int add_sat, const options *opt) {
+  if (opt->metric == SAT && st->sat_metric + add_sat > st->max_sat_metric) {
     return false;
   }
   if (st->num_gates + add > st->max_gates) {
@@ -311,7 +326,7 @@ static bool check_num_gates_possible(state *st, int add, int add_sat) {
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
    paper. */
 static gatenum create_circuit(state *st, const ttable target, const ttable mask,
-    const int8_t *inbits, const bool andnot, const bool lut, const bool randomize) {
+    const int8_t *inbits, const options *opt) {
 
   gatenum gate_order[MAX_GATES];
   for (int i = 0; i < st->num_gates; i++) {
@@ -319,7 +334,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   }
 
   /* Randomize the gate search order. */
-  if (randomize) {
+  if (opt->randomize) {
     /* Fisher-Yates shuffle. */
     for (uint32_t i = st->num_gates - 1; i > 0; i--) {
       uint64_t j = xorshift1024() % (i + 1);
@@ -341,20 +356,20 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   /* 2. If there are any gates whose inverse produces the desired map, append a NOT gate, and
      return the ID of the NOT gate. */
 
-  if (!check_num_gates_possible(st, 1, get_sat_metric(NOT))) {
+  if (!check_num_gates_possible(st, 1, get_sat_metric(NOT), opt)) {
     return NO_GATE;
   }
 
   for (int i = 0; i < st->num_gates; i++) {
     if (ttable_equals_mask(target, ~st->gates[gate_order[i]].table, mask)) {
-      return add_not_gate(st, gate_order[i]);
+      return add_not_gate(st, gate_order[i], opt);
     }
   }
 
   /* 3. Look at all pairs of gates in the existing circuit. If they can be combined with a single
      gate to produce the desired map, add that single gate and return its ID. */
 
-  if (!check_num_gates_possible(st, 1, get_sat_metric(AND))) {
+  if (!check_num_gates_possible(st, 1, get_sat_metric(AND), opt)) {
     return NO_GATE;
   }
 
@@ -366,26 +381,26 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       const gatenum gk = gate_order[k];
       const ttable tk = st->gates[gk].table & mask;
       if (ttable_equals(mtarget, ti | tk)) {
-        return add_or_gate(st, gi, gk);
+        return add_or_gate(st, gi, gk, opt);
       }
       if (ttable_equals(mtarget, ti & tk)) {
-        return add_and_gate(st, gi, gk);
+        return add_and_gate(st, gi, gk, opt);
       }
-      if (andnot) {
+      if (opt->andnot) {
         if (ttable_equals_mask(target, ~ti & tk, mask)) {
-          return add_andnot_gate(st, gi, gk);
+          return add_andnot_gate(st, gi, gk, opt);
         }
         if (ttable_equals_mask(target, ~tk & ti, mask)) {
-          return add_andnot_gate(st, gk, gi);
+          return add_andnot_gate(st, gk, gi, opt);
         }
       }
       if (ttable_equals(mtarget, ti ^ tk)) {
-        return add_xor_gate(st, gi, gk);
+        return add_xor_gate(st, gi, gk, opt);
       }
     }
   }
 
-  if (lut) {
+  if (opt->lut_graph) {
     /* Look through all combinations of three gates in the circuit. For each combination, check if
        any of the 256 possible three bit Boolean functions produces the desired map. If so, add that
        LUT and return the ID. */
@@ -402,7 +417,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
             continue;
           }
           uint8_t func;
-          if (!get_lut_function(ta, tb, tc, target, mask, randomize, &func)) {
+          if (!get_lut_function(ta, tb, tc, target, mask, opt->randomize, &func)) {
             continue;
           }
           ttable nt = generate_lut_ttable(func, ta, tb, tc);
@@ -412,7 +427,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       }
     }
 
-    if (!check_num_gates_possible(st, 2, 0)) {
+    if (!check_num_gates_possible(st, 2, 0, opt)) {
       return NO_GATE;
     }
 
@@ -463,7 +478,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           add_lut(st, func_outer, t_outer, a, b, c), d, e);
     }
 
-    if (!check_num_gates_possible(st, 3, 0)) {
+    if (!check_num_gates_possible(st, 3, 0, opt)) {
       bool search7 = false;
       MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
       return NO_GATE;
@@ -508,7 +523,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
        with two gates to produce the desired map, add the gates, and return the ID of the one that
        produces the desired map. */
 
-    if (!check_num_gates_possible(st, 2, get_sat_metric(AND) + get_sat_metric(NOT))) {
+    if (!check_num_gates_possible(st, 2, get_sat_metric(AND) + get_sat_metric(NOT), opt)) {
       return NO_GATE;
     }
 
@@ -519,34 +534,34 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         const gatenum gk = gate_order[k];
         ttable tk = st->gates[gk].table;
         if (ttable_equals_mask(target, ~(ti | tk), mask)) {
-          return add_nor_gate(st, gi, gk);
+          return add_nor_gate(st, gi, gk, opt);
         }
         if (ttable_equals_mask(target, ~(ti & tk), mask)) {
-          return add_nand_gate(st, gi, gk);
+          return add_nand_gate(st, gi, gk, opt);
         }
         if (ttable_equals_mask(target, ~ti | tk, mask)) {
-          return add_or_not_gate(st, gi, gk);
+          return add_or_not_gate(st, gi, gk, opt);
         }
         if (ttable_equals_mask(target, ~tk | ti, mask)) {
-          return add_or_not_gate(st, gk, gi);
+          return add_or_not_gate(st, gk, gi, opt);
         }
-        if (!andnot) {
+        if (!opt->andnot) {
           if (ttable_equals_mask(target, ~ti & tk, mask)) {
-            return add_and_not_gate(st, gi, gk);
+            return add_and_not_gate(st, gi, gk, opt);
           }
           if (ttable_equals_mask(target, ~tk & ti, mask)) {
-            return add_and_not_gate(st, gk, gi);
+            return add_and_not_gate(st, gk, gi, opt);
           }
         } else if (ttable_equals_mask(target, ~ti & ~tk, mask)) {
-          return add_andnot_gate(st, gi, add_not_gate(st, gk));
+          return add_andnot_gate(st, gi, add_not_gate(st, gk, opt), opt);
         }
         if (ttable_equals_mask(target, ~(ti ^ tk), mask)) {
-          return add_xnor_gate(st, gi, gk);
+          return add_xnor_gate(st, gi, gk, opt);
         }
       }
     }
 
-    if (!check_num_gates_possible(st, 3, 2 * get_sat_metric(AND) + get_sat_metric(NOT))) {
+    if (!check_num_gates_possible(st, 3, 2 * get_sat_metric(AND) + get_sat_metric(NOT), opt)) {
       return NO_GATE;
     }
 
@@ -566,165 +581,165 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
             continue;
           }
           if (ttable_equals(mtarget, iandk & tm)) {
-            return add_and_3_gate(st, gi, gk, gm);
+            return add_and_3_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, iandk | tm)) {
-            return add_and_or_gate(st, gi, gk, gm);
+            return add_and_or_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, iork | tm)) {
-            return add_or_3_gate(st, gi, gk, gm);
+            return add_or_3_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, iork & tm)) {
-            return add_or_and_gate(st, gi, gk, gm);
+            return add_or_and_gate(st, gi, gk, gm, opt);
           }
           ttable iandm = ti & tm;
           if (ttable_equals(mtarget, iandm | tk)) {
-            return add_and_or_gate(st, gi, gm, gk);
+            return add_and_or_gate(st, gi, gm, gk, opt);
           }
           ttable kandm = tk & tm;
           if (ttable_equals(mtarget, kandm | ti)) {
-            return add_and_or_gate(st, gk, gm, gi);
+            return add_and_or_gate(st, gk, gm, gi, opt);
           }
           ttable iorm = ti | tm;
           if (ttable_equals(mtarget, iorm & tk)) {
-            return add_or_and_gate(st, gi, gm, gk);
+            return add_or_and_gate(st, gi, gm, gk, opt);
           }
           ttable korm = tk | tm;
           if (ttable_equals(mtarget, korm & ti)) {
-            return add_or_and_gate(st, gk, gm, gi);
+            return add_or_and_gate(st, gk, gm, gi, opt);
           }
-          if (andnot) {
+          if (opt->andnot) {
             if (ttable_equals(mtarget, ti | (~tk & tm))) {
-              return add_andnot_or_gate(st, gk, gm, gi);
+              return add_andnot_or_gate(st, gk, gm, gi, opt);
             }
             if (ttable_equals(mtarget, ti | (tk & ~tm))) {
-              return add_andnot_or_gate(st, gm, gk, gi);
+              return add_andnot_or_gate(st, gm, gk, gi, opt);
             }
             if (ttable_equals(mtarget, tm | (~ti & tk))) {
-              return add_andnot_or_gate(st, gi, gk, gm);
+              return add_andnot_or_gate(st, gi, gk, gm, opt);
             }
             if (ttable_equals(mtarget, tm | (ti & ~tk))) {
-              return add_andnot_or_gate(st, gk, gi, gm);
+              return add_andnot_or_gate(st, gk, gi, gm, opt);
             }
             if (ttable_equals(mtarget, tk | (~ti & tm))) {
-              return add_andnot_or_gate(st, gi, gm, gk);
+              return add_andnot_or_gate(st, gi, gm, gk, opt);
             }
             if (ttable_equals(mtarget, tk | (ti & ~tm))) {
-              return add_andnot_or_gate(st, gm, gi, gk);
+              return add_andnot_or_gate(st, gm, gi, gk, opt);
             }
             if (ttable_equals(mtarget, ~ti & tk & tm)) {
-              return add_and_andnot_gate(st, gi, gk, gm);
+              return add_and_andnot_gate(st, gi, gk, gm, opt);
             }
             if (ttable_equals(mtarget, ti & ~tk & tm)) {
-              return add_and_andnot_gate(st, gk, gi, gm);
+              return add_and_andnot_gate(st, gk, gi, gm, opt);
             }
             if (ttable_equals(mtarget, ti & tk & ~tm)) {
-              return add_and_andnot_gate(st, gm, gk, gi);
+              return add_and_andnot_gate(st, gm, gk, gi, opt);
             }
             if (ttable_equals(mtarget, ~ti & ~tk & tm)) {
-              return add_andnot_3_a_gate(st, gi, gk, gm);
+              return add_andnot_3_a_gate(st, gi, gk, gm, opt);
             }
             if (ttable_equals(mtarget, ~ti & tk & ~tm)) {
-              return add_andnot_3_a_gate(st, gi, gm, gk);
+              return add_andnot_3_a_gate(st, gi, gm, gk, opt);
             }
             if (ttable_equals(mtarget, ti & ~tk & ~tm)) {
-              return add_andnot_3_a_gate(st, gk, gm, gi);
+              return add_andnot_3_a_gate(st, gk, gm, gi, opt);
             }
             if (ttable_equals(mtarget, ti & ~(~tk & tm))) {
-              return add_andnot_3_b_gate(st, gk, gm, gi);
+              return add_andnot_3_b_gate(st, gk, gm, gi, opt);
             }
             if (ttable_equals(mtarget, ti & ~(tk & ~tm))) {
-              return add_andnot_3_b_gate(st, gm, gk, gi);
+              return add_andnot_3_b_gate(st, gm, gk, gi, opt);
             }
             if (ttable_equals(mtarget, tk & ~(~ti & tm))) {
-              return add_andnot_3_b_gate(st, gi, gm, gk);
+              return add_andnot_3_b_gate(st, gi, gm, gk, opt);
             }
             if (ttable_equals(mtarget, tk & ~(ti & ~tm))) {
-              return add_andnot_3_b_gate(st, gm, gi, gk);
+              return add_andnot_3_b_gate(st, gm, gi, gk, opt);
             }
             if (ttable_equals(mtarget, tm & ~(~tk & ti))) {
-              return add_andnot_3_b_gate(st, gk, gi, gm);
+              return add_andnot_3_b_gate(st, gk, gi, gm, opt);
             }
             if (ttable_equals(mtarget, tm & ~(tk & ~ti))) {
-              return add_andnot_3_b_gate(st, gi, gk, gm);
+              return add_andnot_3_b_gate(st, gi, gk, gm, opt);
             }
             if (ttable_equals(mtarget, ~ti & (tk ^ tm))) {
-              return add_xor_andnot_a_gate(st, gk, gm, gi);
+              return add_xor_andnot_a_gate(st, gk, gm, gi, opt);
             }
             if (ttable_equals(mtarget, ~tk & (ti ^ tm))) {
-              return add_xor_andnot_a_gate(st, gi, gm, gk);
+              return add_xor_andnot_a_gate(st, gi, gm, gk, opt);
             }
             if (ttable_equals(mtarget, ~tm & (tk ^ ti))) {
-              return add_xor_andnot_a_gate(st, gk, gi, gm);
+              return add_xor_andnot_a_gate(st, gk, gi, gm, opt);
             }
             if (ttable_equals(mtarget, ti & ~(tk ^ tm))) {
-              return add_xor_andnot_b_gate(st, gk, gm, gi);
+              return add_xor_andnot_b_gate(st, gk, gm, gi, opt);
             }
             if (ttable_equals(mtarget, tk & ~(ti ^ tm))) {
-              return add_xor_andnot_b_gate(st, gi, gm, gk);
+              return add_xor_andnot_b_gate(st, gi, gm, gk, opt);
             }
             if (ttable_equals(mtarget, tm & ~(tk ^ ti))) {
-              return add_xor_andnot_b_gate(st, gk, gi, gm);
+              return add_xor_andnot_b_gate(st, gk, gi, gm, opt);
             }
             if (ttable_equals(mtarget, ti ^ (~tk & tm))) {
-              return add_andnot_xor_gate(st, gk, gm, gi);
+              return add_andnot_xor_gate(st, gk, gm, gi, opt);
             }
             if (ttable_equals(mtarget, ti ^ (tk & ~tm))) {
-              return add_andnot_xor_gate(st, gm, gk, gi);
+              return add_andnot_xor_gate(st, gm, gk, gi, opt);
             }
             if (ttable_equals(mtarget, tk ^ (~ti & tm))) {
-              return add_andnot_xor_gate(st, gi, gm, gk);
+              return add_andnot_xor_gate(st, gi, gm, gk, opt);
             }
             if (ttable_equals(mtarget, tk ^ (ti & ~tm))) {
-              return add_andnot_xor_gate(st, gm, gi, gk);
+              return add_andnot_xor_gate(st, gm, gi, gk, opt);
             }
             if (ttable_equals(mtarget, tm ^ (~tk & ti))) {
-              return add_andnot_xor_gate(st, gk, gi, gm);
+              return add_andnot_xor_gate(st, gk, gi, gm, opt);
             }
             if (ttable_equals(mtarget, tm ^ (tk & ~ti))) {
-              return add_andnot_xor_gate(st, gi, gk, gm);
+              return add_andnot_xor_gate(st, gi, gk, gm, opt);
             }
           }
           if (ttable_equals(mtarget, ixork | tm)) {
-            return add_xor_or_gate(st, gi, gk, gm);
+            return add_xor_or_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, ixork & tm)) {
-            return add_xor_and_gate(st, gi, gk, gm);
+            return add_xor_and_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, iandk ^ tm)) {
-            return add_and_xor_gate(st, gi, gk, gm);
+            return add_and_xor_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, iork ^ tm)) {
-            return add_or_xor_gate(st, gi, gk, gm);
+            return add_or_xor_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, ixork ^ tm)) {
-            return add_xor_3_gate(st, gi, gk, gm);
+            return add_xor_3_gate(st, gi, gk, gm, opt);
           }
           if (ttable_equals(mtarget, iandm ^ tk)) {
-            return add_and_xor_gate(st, gi, gm, gk);
+            return add_and_xor_gate(st, gi, gm, gk, opt);
           }
           if (ttable_equals(mtarget, kandm ^ ti)) {
-            return add_and_xor_gate(st, gk, gm, gi);
+            return add_and_xor_gate(st, gk, gm, gi, opt);
           }
           ttable ixorm = ti ^ tm;
           if (ttable_equals(mtarget, ixorm | tk)) {
-            return add_xor_or_gate(st, gi, gm, gk);
+            return add_xor_or_gate(st, gi, gm, gk, opt);
           }
           if (ttable_equals(mtarget, ixorm & tk)) {
-            return add_xor_and_gate(st, gi, gm, gk);
+            return add_xor_and_gate(st, gi, gm, gk, opt);
           }
           ttable kxorm = tk ^ tm;
           if (ttable_equals(mtarget, kxorm | ti)) {
-            return add_xor_or_gate(st, gk, gm, gi);
+            return add_xor_or_gate(st, gk, gm, gi, opt);
           }
           if (ttable_equals(mtarget, kxorm & ti)) {
-            return add_xor_and_gate(st, gk, gm, gi);
+            return add_xor_and_gate(st, gk, gm, gi, opt);
           }
           if (ttable_equals(mtarget, iorm ^ tk)) {
-            return add_or_xor_gate(st, gi, gm, gk);
+            return add_or_xor_gate(st, gi, gm, gk, opt);
           }
           if (ttable_equals(mtarget, korm ^ ti)) {
-            return add_or_xor_gate(st, gk, gm, gi);
+            return add_or_xor_gate(st, gk, gm, gi, opt);
           }
         }
       }
@@ -767,15 +782,15 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     const ttable fsel = st->gates[bit].table; /* Selection bit. */
     state nst;
     gatenum nst_out;
-    if (lut) {
+    if (opt->lut_graph) {
       nst = *st;
       nst.max_gates -= 1; /* A multiplexer will have to be added later. */
-      gatenum fb = create_circuit(&nst, target, mask & ~fsel, next_inbits, andnot, true, randomize);
+      gatenum fb = create_circuit(&nst, target, mask & ~fsel, next_inbits, opt);
       if (fb == NO_GATE) {
         continue;
       }
       assert(ttable_equals_mask(target, nst.gates[fb].table, mask & ~fsel));
-      gatenum fc = create_circuit(&nst, target, mask & fsel, next_inbits, andnot, true, randomize);
+      gatenum fc = create_circuit(&nst, target, mask & fsel, next_inbits, opt);
       if (fc == NO_GATE) {
         continue;
       }
@@ -786,13 +801,13 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         nst_out = fb;
         assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
       } else if (fb == bit) {
-        nst_out = add_and_gate(&nst, fb, fc);
+        nst_out = add_and_gate(&nst, fb, fc, opt);
         if (nst_out == NO_GATE) {
           continue;
         }
         assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
       } else if (fc == bit) {
-        nst_out = add_or_gate(&nst, fb, fc);
+        nst_out = add_or_gate(&nst, fb, fc, opt);
         if (nst_out == NO_GATE) {
           continue;
         }
@@ -814,17 +829,16 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       nst_and.max_gates -= 2;
       nst_and.max_sat_metric -= get_sat_metric(AND) + get_sat_metric(XOR);
 
-      gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits, andnot,
-          false, randomize);
+      gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits, opt);
       gatenum mux_out_and = NO_GATE;
       if (fb != NO_GATE) {
         gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
-            next_inbits, andnot, false, randomize);
+            next_inbits, opt);
         /* Add back subtracted max from above. */
         nst_and.max_gates += 2;
         nst_and.max_sat_metric += get_sat_metric(AND) + get_sat_metric(XOR);
-        gatenum andg = add_and_gate(&nst_and, fc, bit);
-        mux_out_and = add_xor_gate(&nst_and, fb, andg);
+        gatenum andg = add_and_gate(&nst_and, fc, bit, opt);
+        mux_out_and = add_xor_gate(&nst_and, fb, andg, opt);
         assert(mux_out_and == NO_GATE ||
             ttable_equals_mask(target, nst_and.gates[mux_out_and].table, mask));
       }
@@ -839,17 +853,16 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       nst_or.max_gates -= 2;
       nst_or.max_sat_metric -= get_sat_metric(OR) + get_sat_metric(XOR);
 
-      gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits, andnot, false,
-          randomize);
+      gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits, opt);
       gatenum mux_out_or = NO_GATE;
       if (fd != NO_GATE) {
         gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
-            next_inbits, andnot, false, randomize);
+            next_inbits, opt);
         /* Add back subtracted max from above. */
         nst_or.max_gates += 2;
         nst_or.max_sat_metric += get_sat_metric(AND) + get_sat_metric(XOR);
-        gatenum org = add_or_gate(&nst_or, fe, bit);
-        mux_out_or = add_xor_gate(&nst_or, fd, org);
+        gatenum org = add_or_gate(&nst_or, fe, bit, opt);
+        mux_out_or = add_xor_gate(&nst_or, fd, org, opt);
         assert(mux_out_or == NO_GATE ||
             ttable_equals_mask(target, nst_or.gates[mux_out_or].table, mask));
         nst_or.max_gates = st->max_gates;
@@ -859,7 +872,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         continue;
       }
 
-      if (g_metric == GATES) {
+      if (opt->metric == GATES) {
         if (mux_out_or == NO_GATE
             || (mux_out_and != NO_GATE && nst_and.num_gates < nst_or.num_gates)) {
           nst = nst_and;
@@ -881,7 +894,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     }
 
     assert(best.num_gates == 0 || ttable_equals_mask(target, best.gates[best_out].table, mask));
-    if (g_metric == GATES) {
+    if (opt->metric == GATES) {
       if (best.num_gates == 0 || nst.num_gates < best.num_gates) {
         best = nst;
         best_out = nst_out;
@@ -968,26 +981,24 @@ static ttable generate_mask(int num_inputs) {
   return t;
 }
 
-void generate_graph_one_output(const bool andnot, const bool lut, const bool randomize,
-    const int iterations, const int output, state st) {
-  assert(iterations > 0);
-  assert(output >= 0 && output <= get_num_outputs() - 1);
-  printf("Generating graphs for output %d...\n", output);
-  for (int iter = 0; iter < iterations; iter++) {
+void generate_graph_one_output(state st, const options *opt) {
+  assert(opt->iterations > 0);
+  assert(opt->oneoutput >= 0 && opt->oneoutput <= get_num_outputs() - 1);
+  printf("Generating graphs for output %d...\n", opt->oneoutput);
+  for (int iter = 0; iter < opt->iterations; iter++) {
     state nst = st;
 
     int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
     const ttable mask = generate_mask(get_num_inputs(&st));
-    nst.outputs[output] = create_circuit(&nst, g_target[output], mask, bits, andnot, lut,
-        randomize);
-    if (nst.outputs[output] == NO_GATE) {
-      printf("(%d/%d): Not found.\n", iter + 1, iterations);
+    nst.outputs[opt->oneoutput] = create_circuit(&nst, g_target[opt->oneoutput], mask, bits, opt);
+    if (nst.outputs[opt->oneoutput] == NO_GATE) {
+      printf("(%d/%d): Not found.\n", iter + 1, opt->iterations);
       continue;
     }
-    printf("(%d/%d): %d gates. SAT metric: %d\n", iter + 1, iterations,
+    printf("(%d/%d): %d gates. SAT metric: %d\n", iter + 1, opt->iterations,
         nst.num_gates - get_num_inputs(&nst), nst.sat_metric);
     save_state(nst);
-    if (g_metric == GATES) {
+    if (opt->metric == GATES) {
       if (nst.num_gates < st.max_gates) {
         st.max_gates = nst.num_gates;
       }
@@ -1010,8 +1021,8 @@ static inline int count_state_outputs(state st) {
 }
 
 /* Called by main to generate a graph. */
-void generate_graph(const bool andnot, const bool lut, const bool randomize, const int iterations,
-    const state st) {
+void generate_graph(const state st, const options *opt) {
+  assert(opt != NULL);
   int num_start_states = 1;
   state start_states[20];
   start_states[0] = st;
@@ -1026,9 +1037,9 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
     memset(out_states, 0, sizeof(state) * 20);
     int num_out_states = 0;
 
-    for (int iter = 0; iter < iterations; iter++) {
+    for (int iter = 0; iter < opt->iterations; iter++) {
       printf("Generating circuits with %d output%s. (%d/%d)\n", num_outputs + 1,
-          num_outputs == 0 ? "" : "s", iter + 1, iterations);
+          num_outputs == 0 ? "" : "s", iter + 1, opt->iterations);
       for (uint8_t current_state = 0; current_state < num_start_states; current_state++) {
         start_states[current_state].max_gates = max_gates;
         start_states[current_state].max_sat_metric = max_sat_metric;
@@ -1042,15 +1053,14 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
           printf("Generating circuit for output %d...\n", output);
           int8_t bits[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
           state st = start_states[current_state];
-          if (g_metric == GATES) {
+          if (opt->metric == GATES) {
             st.max_gates = max_gates;
           } else {
             st.max_sat_metric = max_sat_metric;
           }
 
           const ttable mask = generate_mask(get_num_inputs(&st));
-          st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, andnot, lut,
-              randomize);
+          st.outputs[output] = create_circuit(&st, g_target[output], mask, bits, opt);
           if (st.outputs[output] == NO_GATE) {
             printf("No solution for output %d.\n", output);
             continue;
@@ -1058,7 +1068,7 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
           assert(ttable_equals_mask(g_target[output], st.gates[st.outputs[output]].table, mask));
           save_state(st);
 
-          if (g_metric == GATES) {
+          if (opt->metric == GATES) {
             if (max_gates > st.num_gates) {
               max_gates = st.num_gates;
               num_out_states = 0;
@@ -1086,7 +1096,7 @@ void generate_graph(const bool andnot, const bool lut, const bool randomize, con
         }
       }
     }
-    if (g_metric == GATES) {
+    if (opt->metric == GATES) {
       printf("Found %d state%s with %d gates.\n", num_out_states,
           num_out_states == 1 ? "" : "s", max_gates - get_num_inputs(&out_states[0]));
     } else {
@@ -1178,6 +1188,223 @@ void create_g_mpi_work_type() {
   assert(MPI_Type_commit(&g_mpi_work_type) == MPI_SUCCESS);
 }
 
+/* Print the program usage help to stdout. */
+void print_command_help(const char *name) {
+  assert(name != NULL);
+  printf(
+            "\nsboxgates generates graphs of Boolean gates or 3-input LUTs that realize a\n"
+            "specified S-box. The program uses MPI for parallellization and should therefore\n"
+            "be run using the mpirun utility. Generated graphs are output as XML files.\n"
+            "In its basic mode, the program generates a single graph for all outputs of the\n"
+            "S-box. It is also possible to generate separate graphs for each output, which\n"
+            "can significantly decrease the time to generate the graph.\n\n"
+
+            "Generated graphs can be converted to C/CUDA source code or to Graphviz DOT\n"
+            "format.\n\n"
+
+            "Arguments:\n"
+            "-b file   Target S-box definition file. (Mandatory)\n"
+            "-g file   Load graph from file as initial state. (For use with -o.)\n"
+            "-h        Display this help.\n"
+            "-i n      Do n iterations per step.\n"
+            "-l        Generate LUT graph. Results in smaller graphs but takes significantly\n"
+            "          longer time.\n"
+            "-n        Use ANDNOT gates in addition to NOT, AND, OR, and XOR.\n"
+            "-o n      Generate one-output graph for output n.\n"
+            "-p value  Permute sbox by XORing input with value.\n"
+            "-s        Use SAT metric to optimize the generated graph for use with SAT\n"
+            "          solvers.\n\n"
+
+            "Graph conversion arguments, used alone:\n"
+            "-c file   Convert file to C/CUDA function.\n"
+            "-d file   Convert file to DOT digraph.\n\n"
+
+            "Examples:\n"
+            "mpirun %s -b sboxes/des_s1.txt\n"
+            "Generates a gate graph for all output bits of the DES S1 S-box.\n\n"
+
+            "mpirun %s -l -b sboxes/des_s1.txt\n"
+            "Generates a LUT graph for all output bits of the DES S1 S-box.\n\n"
+
+            "mpirun %s -o 0 -b sboxes/rijndael.txt\n"
+            "Generates a gate graph for output bit 0 of the Rijndael S-box.\n\n"
+
+            "mpirun %s -d 2-017-0000-01-b55885b4.xml | dot -Tpng > 2-017-0000-01-b55885b4.png\n"
+            "Converts a generated graph to Graphviz DOT format and generates a graphical\n"
+            "representation.\n\n", name, name, name, name);
+}
+
+/* Used in parse_options to increase readability. */
+#define PARSE_OPTIONS_TEST_NAME_LENGTH(X)\
+  if (strlen(X) >= MAX_NAME_LEN) {\
+    fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);\
+    return false;\
+  }
+
+/* Parses command line options and places the result in an options structure. In case of error,
+   the function will return false and set retval to a suggested return value for main. */
+bool parse_options(int argc, char **argv, options *opt, int *retval) {
+  assert(argc > 0);
+  assert(argv != NULL);
+  assert(opt != NULL);
+  assert(retval != NULL);
+  char *name = argv[0];
+
+  if (argc == 1) {
+    print_command_help(name);
+    *retval = 1;
+    return false;
+  }
+
+  memset(opt, 0, sizeof(options));
+  opt->oneoutput = -1;
+  opt->iterations = 1;
+  opt->randomize = true;
+  opt->metric = GATES;
+
+  char opts[] = "b:c:d:g:hi:lno:p:s";
+
+  int c;
+  char *endptr;
+  while ((c = getopt(argc, argv, opts)) != -1) {
+    switch (c) {
+      /* Set target S-box definition. */
+      case 'b':
+        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
+        strcpy(opt->sboxfname, optarg);
+        break;
+      /* Convert generated graph to C function. */
+      case 'c':
+        opt->output_c = true;
+        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
+        strcpy(opt->fname, optarg);
+        break;
+      /* Convert generated graph to DOT digraph. */
+      case 'd':
+        opt->output_dot = true;
+        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
+        strcpy(opt->fname, optarg);
+        break;
+      /* Load graph from file. */
+      case 'g':
+        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
+        strcpy(opt->gfname, optarg);
+        break;
+      /* Print help. */
+      case 'h':
+        print_command_help(name);
+        *retval = 0;
+        return false;
+      /* Do multiple iterations per step. */
+      case 'i':
+        opt->iterations = strtoul(optarg, &endptr, 10);
+        if (*endptr != '\0' || opt->iterations < 1) {
+          fprintf(stderr, "Bad iterations value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        }
+        break;
+      /* Generate 3LUT graph. */
+      case 'l':
+        opt->lut_graph = true;
+        break;
+      /* Use ANDNOT gates. */
+      case 'n':
+        opt->andnot = true;
+        break;
+      /* Generate single-output graph. */
+      case 'o':
+        opt->oneoutput = strtoul(optarg, &endptr, 10);
+        if (*endptr != '\0' || opt->oneoutput < 0 || opt->oneoutput > 7) {
+          fprintf(stderr, "Bad output value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+          *retval = 1;
+          return false;
+        }
+        break;
+      /* Permute S-box by XORing input with value. */
+      case 'p':
+        opt->permute = strtoul(optarg, &endptr, 10);
+        if (*endptr != '\0' || opt->permute < 0 || opt->permute > 255) {
+          fprintf(stderr, "Bad permutation value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+          *retval = 1;
+          return false;
+        }
+        break;
+      /* Use SAT metric. */
+      case 's':
+        opt->metric = SAT;
+        break;
+      /* Undefined flag. */
+      default:
+        fprintf(stderr, "Bad argument. (sboxgates.c:%d)\n", __LINE__);
+        *retval = 1;
+        return false;
+    }
+  }
+
+  if (opt->output_c && opt->output_dot) {
+    fprintf(stderr, "Cannot combine c and d options. (sboxgates.c:%d)\n", __LINE__);
+    *retval = 1;
+    return false;
+  }
+
+  if (opt->lut_graph && opt->metric == SAT) {
+    fprintf(stderr, "SAT metric can not be combined with LUT graph generation. (sboxgates.c:%d)\n",
+        __LINE__);
+    *retval = 1;
+    return false;
+  }
+
+  if (strlen(opt->sboxfname) == 0) {
+    fprintf(stderr, "No target S-box file name argument. (sboxgates.c:%d)\n", __LINE__);
+    *retval = 1;
+    return false;
+  }
+
+  return true;
+}
+
+/* Loads an S-box from a file. The file should contain the S-box table as 2^n (1 <= n <= 8)
+   whitespace separated hexadecimal numbers. The S-box is loaded into the 256 item array pointed to
+   by sbox and num_input is set to the calculated number of input bits. The input file name is
+   taken from the opt structure. */
+bool load_sbox(uint8_t *sbox, uint32_t *num_inputs, const options *opt) {
+  assert(sbox != NULL);
+  assert(num_inputs != NULL);
+  assert(opt != NULL);
+  assert(opt->sboxfname != NULL);
+  int sbox_inp = 0;
+
+  FILE *fp = fopen(opt->sboxfname, "r");
+  if (fp == NULL) {
+    fprintf(stderr, "Error when opening target S-box file. (sboxgates.c:%d)\n", __LINE__);
+    return false;
+  }
+
+  int ret;
+  uint8_t target_sbox[256];
+  memset(target_sbox, 0, sizeof(uint8_t) * 256);
+  uint32_t input;
+  while ((ret = fscanf(fp, " %x", &input)) > 0 && ret != EOF && sbox_inp < 256 && input < 256) {
+    target_sbox[sbox_inp++] = input;
+  }
+  fclose(fp);
+
+  if (__builtin_popcount(sbox_inp) != 1) {
+    fprintf(stderr, "Bad number of items in target S-box. (sboxgates.c:%d)\n", __LINE__);
+    return false;
+  }
+
+  *num_inputs = 31 - __builtin_clz(sbox_inp);
+
+  if (opt->permute == 0) {
+    memcpy(sbox, target_sbox, sizeof(uint8_t) * 256);
+  } else {
+    for (int i = 0; i < 256; i++) {
+      sbox[i] = target_sbox[i ^ (uint8_t)opt->permute];
+    }
+  }
+  return true;
+}
+
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
   int rank, size;
@@ -1186,199 +1413,48 @@ int main(int argc, char **argv) {
 
   create_g_mpi_work_type();
 
-  bool output_dot = false;
-  bool output_c = false;
-  bool lut_graph = false;
-  bool andnot = false;
-  bool randomize = true;
-  char fname[1000];
-  char gfname[1000];
-  char sboxfname[1000];
-  int oneoutput = -1;
-  int permute = 0;
-  int iterations = 1;
-  int c;
-  char *opts = "b:c:d:g:hi:lno:p:s";
-
-  strcpy(fname, "");
-  strcpy(gfname, "");
-  strcpy(sboxfname, "");
-
-  while ((c = getopt(argc, argv, opts)) != -1) {
-    switch (c) {
-      case 'b':
-        if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
-          MPI_Finalize();
-          return 1;
-        }
-        strcpy(sboxfname, optarg);
-        break;
-      case 'c':
-        if (rank != 0) {
-          MPI_Finalize();
-          return 0;
-        }
-        output_c = true;
-        if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
-          MPI_Finalize();
-          return 1;
-        }
-        strcpy(fname, optarg);
-        break;
-      case 'd':
-        if (rank != 0) {
-          MPI_Finalize();
-          return 0;
-        }
-        output_dot = true;
-        if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
-          MPI_Finalize();
-          return 1;
-        }
-        strcpy(fname, optarg);
-        break;
-      case 'g':
-        if (strlen(optarg) >= 1000) {
-          fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);
-          MPI_Finalize();
-          return 1;
-        }
-        strcpy(gfname, optarg);
-        break;
-      case 'h':
-        if (rank != 0) {
-          MPI_Finalize();
-          return 0;
-        }
-        printf(
-            "-b file   Target S-box definition.\n"
-            "-c file   Output C function.\n"
-            "-d file   Output DOT digraph.\n"
-            "-g file   Load graph from file as initial state. (For use with -o.)\n"
-            "-h        Display this help.\n"
-            "-i n      Do n iterations per step.\n"
-            "-l        Generate LUT graph.\n"
-            "-n        Use ANDNOT gates.\n"
-            "-o n      Generate one-output graph for output n.\n"
-            "-p value  Permute sbox by XORing input with value.\n"
-            "-s        Use SAT metric.\n");
-        MPI_Finalize();
-        return 0;
-      case 'i':
-        iterations = atoi(optarg);
-        if (iterations < 1) {
-          fprintf(stderr, "Bad iterations value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
-        }
-        break;
-      case 'l':
-        lut_graph = true;
-        break;
-      case 'n':
-        andnot = true;
-        break;
-      case 'o':
-        oneoutput = atoi(optarg);
-        if (oneoutput < 0 || oneoutput > 7) {
-          fprintf(stderr, "Bad output value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
-          MPI_Finalize();
-          return 1;
-        }
-        break;
-      case 'p':
-        permute = atoi(optarg);
-        if (permute < 0 || permute > 255) {
-          fprintf(stderr, "Bad permutation value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
-          MPI_Finalize();
-          return 1;
-        }
-        break;
-      case 's':
-        g_metric = SAT;
-        break;
-      default:
-        MPI_Finalize();
-        return 1;
-    }
-  }
-
-  if (output_c && output_dot) {
-    fprintf(stderr, "Cannot combine c and d options. (sboxgates.c:%d)\n", __LINE__);
-    MPI_Finalize();
-    return 1;
-  }
-
-  if (lut_graph && g_metric == SAT) {
-    fprintf(stderr, "SAT metric can not be combined with LUT graph generation. (sboxgates.c:%d)\n",
-        __LINE__);
-    MPI_Finalize();
-    return 1;
-  }
-
-  if (output_c || output_dot) {
-    state st;
-    if (!load_state(fname, &st)) {
-      fprintf(stderr, "Error when reading state file. (sboxgates.c:%d)\n", __LINE__);
-      MPI_Finalize();
-      return 1;
-    }
-    if (output_c) {
-      if (!print_c_function(st)) {
-        MPI_Finalize();
-        return 1;
-      }
-    } else {
-      print_digraph(st);
-    }
-    MPI_Finalize();
-    return 0;
-  }
-
+  /* Let all ranks except for rank 0 go into worker loop. */
   if (rank != 0) {
     mpi_worker();
     MPI_Finalize();
     return 0;
   }
 
-  if (strlen(sboxfname) == 0) {
-    fprintf(stderr, "No target S-box file name argument. (sboxgates.c:%d)\n", __LINE__);
+  /* Parse command line options. */
+  options opt;
+  int retval;
+  if (!parse_options(argc, argv, &opt, &retval)) {
     stop_workers();
-    return 1;
+    MPI_Finalize();
+    return retval;
   }
 
-  uint8_t target_sbox[256];
-  memset(target_sbox, 0, sizeof(uint8_t) * 256);
-  int sbox_inp = 0;
-  int ret;
-  uint32_t input;
-  uint32_t num_outputs = 0;
-  FILE *sboxfp = fopen(sboxfname, "r");
-  if (sboxfp == NULL) {
-    fprintf(stderr, "Error when opening target S-box file. (sboxgates.c:%d)\n", __LINE__);
+  /* Convert graph to C or DOT output and quit. */
+  if (opt.output_c || opt.output_dot) {
     stop_workers();
-    return 1;
-  }
-  while ((ret = fscanf(sboxfp, " %x", &input)) > 0 && ret != EOF && sbox_inp < 256 && input < 256) {
-    target_sbox[sbox_inp++] = input;
-    num_outputs |= input;
-  }
-  fclose(sboxfp);
-  if (__builtin_popcount(sbox_inp) != 1) {
-    fprintf(stderr, "Bad number of items in target S-box. (sboxgates.c:%d)\n", __LINE__);
-    stop_workers();
-    return 1;
-  }
-  uint32_t num_inputs = 31 - __builtin_clz(sbox_inp);
-  num_outputs = 32 - __builtin_clz(num_outputs);
-
-  if (permute == 0) {
-    memcpy(g_sbox_enc, target_sbox, 256 * sizeof(uint8_t));
-  } else {
-    for (int i = 0; i < 256; i++) {
-      g_sbox_enc[i] = target_sbox[i ^ (uint8_t)permute];
+    state st;
+    if (!load_state(opt.fname, &st)) {
+      fprintf(stderr, "Error when reading state file. (sboxgates.c:%d)\n", __LINE__);
+      return false;
     }
+    int retval = 0;
+    if (opt.output_c) {
+      if (!print_c_function(st)) {
+        retval = 1;
+      }
+    } else {
+      print_digraph(st);
+    }
+    MPI_Finalize();
+    return retval;
+  }
+
+  /* Load specified S-box from file. */
+  uint32_t num_inputs; /* Used to initialize the input gates below. */
+  if (!load_sbox(g_sbox_enc, &num_inputs, &opt)) {
+    stop_workers();
+    MPI_Finalize();
+    return 1;
   }
 
   /* Generate truth tables for all output bits of the target sbox. */
@@ -1386,9 +1462,18 @@ int main(int argc, char **argv) {
     g_target[i] = generate_target(i, true);
   }
 
+  if (opt.oneoutput >= get_num_outputs()) {
+    fprintf(stderr, "Error: Can't generate output bit %d. Target S-box only has %d outputs. "
+        "(sboxgates.c:%d)\n", opt.oneoutput, get_num_outputs(), __LINE__);
+    stop_workers();
+    MPI_Finalize();
+    return 1;
+  }
+
+  /* Initialize the state structure. */
   state st;
   memset(&st, 0, sizeof(state));
-  if (strlen(gfname) == 0) {
+  if (strlen(opt.gfname) == 0) {
     st.max_sat_metric = INT_MAX;
     st.sat_metric = 0;
     st.max_gates = MAX_GATES;
@@ -1404,22 +1489,19 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 8; i++) {
       st.outputs[i] = NO_GATE;
     }
-  } else if (!load_state(gfname, &st)) {
+  } else if (!load_state(opt.gfname, &st)) {
+    stop_workers();
     MPI_Finalize();
     return 1;
   } else {
-    printf("Loaded %s.\n", gfname);
+    printf("Loaded %s.\n", opt.gfname);
   }
 
-  if (oneoutput != -1) {
-    if (oneoutput >= get_num_outputs()) {
-      printf("Error: Can't generate output bit %d. Target S-box only has %d outputs.\n",
-          oneoutput, get_num_outputs());
-    } else {
-      generate_graph_one_output(andnot, lut_graph, randomize, iterations, oneoutput, st);
-    }
+  /* Generate the graph. */
+  if (opt.oneoutput != -1) {
+    generate_graph_one_output(st, &opt);
   } else {
-    generate_graph(andnot, lut_graph, randomize, iterations, st);
+    generate_graph(st, &opt);
   }
 
   stop_workers();

@@ -20,6 +20,24 @@
 
 #include "state.h"
 
+#define MAX_NAME_LEN (1000)
+
+/* Holds all options set by the user. */
+typedef struct {
+   char fname[MAX_NAME_LEN];     /* Graph file name for generating C or DOT output. */
+   char gfname[MAX_NAME_LEN];    /* Partial graph file name. */
+   char sboxfname[MAX_NAME_LEN]; /* S-box file name */
+   int iterations;               /* Number of iterations per step. */
+   int oneoutput;                /* Set to 0-8 if only one output should be generated, else -1. */
+   int permute;                  /* Set to 1-255 if S-box should be XOR permuted. */
+   metric metric;                /* The graph metric to use. */
+   bool output_c;                /* Set to true to convert graph to C function. */
+   bool output_dot;              /* Set to true to convert graph to DOT graph. */
+   bool lut_graph;               /* Set to true to build 3LUT graph. */
+   bool andnot;                  /* Set to true to include ANDNOT gates. */
+   bool randomize;               /* Set to true to use randomization at various steps. */
+} options;
+
 /* Returns true if the truth table is all-zero. */
 bool ttable_zero(ttable tt);
 
