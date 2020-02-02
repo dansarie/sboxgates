@@ -23,7 +23,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "lut.h"
-#include "sboxgates.h"
 
 static void get_nth_combination(int64_t n, int num_gates, int t, gatenum first, gatenum *ret);
 static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_req,
@@ -580,6 +579,134 @@ bool search_7lut(const state st, const ttable target, const ttable mask, const i
   }
   free(lut_list);
   return get_search_result(ret, &quit_msg, &recv_req, &send_req);
+}
+
+gatenum lut_search(state *st, const ttable target, const ttable mask, const int8_t *inbits,
+    const gatenum *gate_order, const options *opt) {
+  assert(st != NULL);
+  assert(inbits != NULL);
+  assert(gate_order != NULL);
+  assert(opt != NULL);
+  assert(opt->lut_graph);
+
+  /* Look through all combinations of three gates in the circuit. For each combination, check if any
+     of the 256 possible three bit Boolean functions produces the desired map. If so, add that LUT
+     and return the ID. */
+
+  for (int i = 0; i < st->num_gates; i++) {
+    const gatenum gi = gate_order[i];
+    const ttable ta = st->gates[gi].table;
+    for (int k = i + 1; k < st->num_gates; k++) {
+      const gatenum gk = gate_order[k];
+      const ttable tb = st->gates[gk].table;
+      for (int m = k + 1; m < st->num_gates; m++) {
+        const gatenum gm = gate_order[m];
+        const ttable tc = st->gates[gm].table;
+        if (!check_3lut_possible(target, mask, ta, tb, tc)) {
+          continue;
+        }
+        uint8_t func;
+        if (!get_lut_function(ta, tb, tc, target, mask, opt->randomize, &func)) {
+          continue;
+        }
+        ttable nt = generate_lut_ttable(func, ta, tb, tc);
+        assert(ttable_equals_mask(target, nt, mask));
+        return add_lut(st, func, nt, gi, gk, gm);
+      }
+    }
+  }
+
+  if (!check_num_gates_possible(st, 2, 0, opt)) {
+    return NO_GATE;
+  }
+
+  int size;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+  /* Broadcast work to be done. */
+  mpi_work work;
+  work.st = *st;
+  work.target = target;
+  work.mask = mask;
+  work.quit = false;
+  memcpy(work.inbits, inbits, sizeof(uint8_t) * 8);
+  MPI_Bcast(&work, 1, g_mpi_work_type, 0, MPI_COMM_WORLD);
+
+  /* Look through all combinations of five gates in the circuit. For each combination, check if a
+     combination of two of the possible 256 three bit Boolean functions as in LUT(LUT(a,b,c),d,e)
+     produces the desired map. If so, add those LUTs and return the ID of the output LUT. */
+
+  uint16_t res[10];
+
+  memset(res, 0, sizeof(uint16_t) * 10);
+  printf("[   0] Search 5.\n");
+
+  if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, work.inbits, res)) {
+    uint8_t func_outer = (uint8_t)res[0];
+    uint8_t func_inner = (uint8_t)res[1];
+    gatenum a = res[2];
+    gatenum b = res[3];
+    gatenum c = res[4];
+    gatenum d = res[5];
+    gatenum e = res[6];
+    ttable ta = st->gates[a].table;
+    ttable tb = st->gates[b].table;
+    ttable tc = st->gates[c].table;
+    ttable td = st->gates[d].table;
+    ttable te = st->gates[e].table;
+    printf("[   0] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n",
+        func_outer, func_inner, a, b, c, d, e);
+
+    assert(check_5lut_possible(target, mask, ta, tb, tc, td, te));
+    ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+    ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
+    assert(ttable_equals_mask(target, t_inner, mask));
+
+    return add_lut(st, func_inner, t_inner,
+        add_lut(st, func_outer, t_outer, a, b, c), d, e);
+  }
+
+  if (!check_num_gates_possible(st, 3, 0, opt)) {
+    bool search7 = false;
+    MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
+    return NO_GATE;
+  }
+  bool search7 = true;
+  MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
+
+  printf("[   0] Search 7.\n");
+  if (work.st.num_gates >= 7 && search_7lut(work.st, work.target, work.mask, work.inbits, res)) {
+    uint8_t func_outer = (uint8_t)res[0];
+    uint8_t func_middle = (uint8_t)res[1];
+    uint8_t func_inner = (uint8_t)res[2];
+    gatenum a = res[3];
+    gatenum b = res[4];
+    gatenum c = res[5];
+    gatenum d = res[6];
+    gatenum e = res[7];
+    gatenum f = res[8];
+    gatenum g = res[9];
+    ttable ta = st->gates[a].table;
+    ttable tb = st->gates[b].table;
+    ttable tc = st->gates[c].table;
+    ttable td = st->gates[d].table;
+    ttable te = st->gates[e].table;
+    ttable tf = st->gates[f].table;
+    ttable tg = st->gates[g].table;
+    printf("[   0] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n",
+        func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
+    assert(check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg));
+    ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
+    ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
+    ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
+    assert(ttable_equals_mask(target, t_inner, mask));
+    return add_lut(st, func_inner, t_inner,
+        add_lut(st, func_outer, t_outer, a, b, c),
+        add_lut(st, func_middle, t_middle, d, e, f), g);
+  }
+
+  printf("[   0] No LUTs found. Num gates: %d\n", st->num_gates - get_num_inputs(st));
+  return NO_GATE;
 }
 
 /* Generates the nth combination of num_gates choose t gates numbered first, first + 1, ...

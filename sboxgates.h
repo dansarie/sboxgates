@@ -18,6 +18,7 @@
 #ifndef __SBOXGATES_H__
 #define __SBOXGATES_H__
 
+#include <mpi.h>
 #include "state.h"
 
 #define MAX_NAME_LEN (1000)
@@ -37,6 +38,26 @@ typedef struct {
    bool andnot;                  /* Set to true to include ANDNOT gates. */
    bool randomize;               /* Set to true to use randomization at various steps. */
 } options;
+
+/* Used to broadcast work to be done by other MPI ranks. */
+typedef struct {
+  state st;
+  ttable target;
+  ttable mask;
+  int8_t inbits[8];
+  bool quit;        /* Set to true to signal workers to quit. */
+} mpi_work;
+
+MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. */
+
+/* Adds a three input LUT with function func to the state st. Returns the gate number of the
+   added LUT. */
+gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid1, gatenum gid2, gatenum gid3);
+
+/* Used to check if any solutions with smaller metric are possible. Uses either the add or the
+   add_sat parameter depending on the current metric in use. Returns true if a solution with the
+   provided metric is possible with respect to the value of st->max_gates or st->max_sat_metric. */
+bool check_num_gates_possible(state *st, int add, int add_sat, const options *opt);
 
 /* Returns true if the truth table is all-zero. */
 bool ttable_zero(ttable tt);

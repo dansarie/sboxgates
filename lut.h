@@ -2,7 +2,7 @@
 
    Header file for LUT functions.
 
-   Copyright (c) 2019 Marcus Dansarie
+   Copyright (c) 2019-2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #ifndef __LUT_H__
 #define __LUT_H__
 
+#include "sboxgates.h"
 #include "state.h"
 
 /* Returns true if it is possible to generate a LUT with the three input truth tables and an output
@@ -64,5 +65,8 @@ bool search_5lut(const state st, const ttable target, const ttable mask, const i
    and ret[3] - ret[9] the seven input gate numbers. */
 bool search_7lut(const state st, const ttable target, const ttable mask, const int8_t *inbits,
     uint16_t *ret);
+
+gatenum lut_search(state *st, const ttable target, const ttable mask, const int8_t *inbits,
+    const gatenum *gate_order, const options *opt);
 
 #endif /* __LUT_H__ */
