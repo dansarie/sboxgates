@@ -1229,7 +1229,7 @@ bool parse_options(int argc, char **argv, options *opt, int *retval) {
     return false;
   }
 
-  if (strlen(opt->sboxfname) == 0) {
+  if (!opt->output_c && !opt->output_dot && strlen(opt->sboxfname) == 0) {
     fprintf(stderr, "No target S-box file name argument. (sboxgates.c:%d)\n", __LINE__);
     *retval = 1;
     return false;
