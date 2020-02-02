@@ -185,10 +185,10 @@ int get_sat_metric(gate_type type) {
   return 0;
 }
 
-#define LOAD_STATE_RETURN_ON_ERROR(X)\
+#define LOAD_STATE_RETURN_ON_ERROR(X, Y)\
   if (X) {\
     fprintf(stderr, "Error when parsing XML document. (state.c:%d)\n", __LINE__);\
-    if (doc != NULL) xmlFreeDoc(doc);\
+    if (Y != NULL) xmlFreeDoc(Y);\
     return false;\
   }
 
@@ -198,7 +198,7 @@ bool load_state(const char *name, state *return_state) {
   assert(return_state != NULL);
 
   xmlDocPtr doc = xmlParseFile(name);
-  LOAD_STATE_RETURN_ON_ERROR(doc == NULL);
+  LOAD_STATE_RETURN_ON_ERROR(doc == NULL, doc);
 
   /* Get gates. */
   xmlNodePtr gates = NULL;
@@ -208,7 +208,7 @@ bool load_state(const char *name, state *return_state) {
       break;
     }
   }
-  LOAD_STATE_RETURN_ON_ERROR(gates == NULL);
+  LOAD_STATE_RETURN_ON_ERROR(gates == NULL, doc);
 
   state st;
   memset(&st, 0, sizeof(state));
@@ -225,7 +225,7 @@ bool load_state(const char *name, state *return_state) {
 
     /* Parse type enum. */
     char *typestr = (char*)xmlGetProp(gate, (xmlChar*)"type");
-    LOAD_STATE_RETURN_ON_ERROR(typestr == NULL);
+    LOAD_STATE_RETURN_ON_ERROR(typestr == NULL, doc);
     gate_type type;
     if (strcmp(typestr, "IN") == 0) {
       type = IN;
@@ -243,7 +243,7 @@ bool load_state(const char *name, state *return_state) {
       type = LUT;
     } else {
       xmlFree(typestr);
-      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
     }
     xmlFree(typestr);
     typestr = NULL;
@@ -255,10 +255,10 @@ bool load_state(const char *name, state *return_state) {
       func = strtol(funcstr, NULL, 16);
       xmlFree(funcstr);
       funcstr = NULL;
-      LOAD_STATE_RETURN_ON_ERROR(func <= 0 || func > 255);
+      LOAD_STATE_RETURN_ON_ERROR(func <= 0 || func > 255, doc);
     }
     /* Error if function is set for gate types other than LUT. */
-    LOAD_STATE_RETURN_ON_ERROR(type != LUT && func != 0);
+    LOAD_STATE_RETURN_ON_ERROR(type != LUT && func != 0, doc);
 
     /* Parse input gates. */
     int inp = 0;
@@ -272,41 +272,41 @@ bool load_state(const char *name, state *return_state) {
       int gatenum = strtoul(gatestr, &endptr, 10);
       if (*endptr != '\0') {
         xmlFree(gatestr);
-        LOAD_STATE_RETURN_ON_ERROR(TRUE);
+        LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
       }
       xmlFree(gatestr);
       gatestr = NULL;
-      LOAD_STATE_RETURN_ON_ERROR(gatenum >= st.num_gates);
+      LOAD_STATE_RETURN_ON_ERROR(gatenum >= st.num_gates, doc);
       inputs[inp++] = gatenum;
     }
 
     ttable table;
     if (type == IN) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 0);
-      LOAD_STATE_RETURN_ON_ERROR(st.num_gates >= 8);
-      LOAD_STATE_RETURN_ON_ERROR(st.num_gates != 0 && st.gates[st.num_gates - 1].type != IN);
+      LOAD_STATE_RETURN_ON_ERROR(inp != 0, doc);
+      LOAD_STATE_RETURN_ON_ERROR(st.num_gates >= 8, doc);
+      LOAD_STATE_RETURN_ON_ERROR(st.num_gates != 0 && st.gates[st.num_gates - 1].type != IN, doc);
       table = generate_target(st.num_gates, false);
     } else if (type == NOT) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 1);
+      LOAD_STATE_RETURN_ON_ERROR(inp != 1, doc);
       table = ~st.gates[inputs[0]].table;
     } else if (type == AND) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
       table = st.gates[inputs[0]].table & st.gates[inputs[1]].table;
     } else if (type == OR) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
       table = st.gates[inputs[0]].table | st.gates[inputs[1]].table;
     } else if (type == ANDNOT) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
       table = ~st.gates[inputs[0]].table & st.gates[inputs[1]].table;
     } else if (type == XOR) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2);
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
       table = st.gates[inputs[0]].table ^ st.gates[inputs[1]].table;
     } else if (type == LUT) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 3);
+      LOAD_STATE_RETURN_ON_ERROR(inp != 3, doc);
       table = generate_lut_ttable(func, st.gates[inputs[0]].table, st.gates[inputs[1]].table,
           st.gates[inputs[2]].table);
     } else {
-      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
     }
 
     st.gates[st.num_gates].table = table;
@@ -328,22 +328,22 @@ bool load_state(const char *name, state *return_state) {
     int bit = strtoul(bitstr, &endptr, 10);
     if (*endptr != '\0') {
       xmlFree(bitstr);
-      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
     }
     xmlFree(bitstr);
     bitstr = NULL;
-    LOAD_STATE_RETURN_ON_ERROR(bit >= 8);
-    LOAD_STATE_RETURN_ON_ERROR(st.outputs[bit] != NO_GATE);
+    LOAD_STATE_RETURN_ON_ERROR(bit >= 8, doc);
+    LOAD_STATE_RETURN_ON_ERROR(st.outputs[bit] != NO_GATE, doc);
 
     char *gatestr = (char*)xmlGetProp(output, (xmlChar*)"gate");
     int gate = strtoul(gatestr, &endptr, 10);
     if (*endptr != '\0') {
       xmlFree(gatestr);
-      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
     }
     xmlFree(gatestr);
     gatestr = NULL;
-    LOAD_STATE_RETURN_ON_ERROR(gate >= st.num_gates);
+    LOAD_STATE_RETURN_ON_ERROR(gate >= st.num_gates, doc);
 
     st.outputs[bit] = gate;
   }
