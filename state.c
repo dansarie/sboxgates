@@ -268,10 +268,15 @@ bool load_state(const char *name, state *return_state) {
         continue;
       }
       char *gatestr = (char*)xmlGetProp(input, (xmlChar*)"gate");
-      int gatenum = atoi(gatestr);
+      char *endptr;
+      int gatenum = strtoul(gatestr, &endptr, 10);
+      if (*endptr != '\0') {
+        xmlFree(gatestr);
+        LOAD_STATE_RETURN_ON_ERROR(TRUE);
+      }
       xmlFree(gatestr);
       gatestr = NULL;
-      LOAD_STATE_RETURN_ON_ERROR(gatenum < 0 || gatenum >= st.num_gates);
+      LOAD_STATE_RETURN_ON_ERROR(gatenum >= st.num_gates);
       inputs[inp++] = gatenum;
     }
 
@@ -319,17 +324,26 @@ bool load_state(const char *name, state *return_state) {
       continue;
     }
     char *bitstr = (char*)xmlGetProp(output, (xmlChar*)"bit");
-    int bit = atoi(bitstr);
+    char *endptr;
+    int bit = strtoul(bitstr, &endptr, 10);
+    if (*endptr != '\0') {
+      xmlFree(bitstr);
+      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+    }
     xmlFree(bitstr);
     bitstr = NULL;
-    LOAD_STATE_RETURN_ON_ERROR(bit < 0 || bit >= 8);
+    LOAD_STATE_RETURN_ON_ERROR(bit >= 8);
     LOAD_STATE_RETURN_ON_ERROR(st.outputs[bit] != NO_GATE);
 
     char *gatestr = (char*)xmlGetProp(output, (xmlChar*)"gate");
-    int gate = atoi(gatestr);
+    int gate = strtoul(gatestr, &endptr, 10);
+    if (*endptr != '\0') {
+      xmlFree(gatestr);
+      LOAD_STATE_RETURN_ON_ERROR(TRUE);
+    }
     xmlFree(gatestr);
     gatestr = NULL;
-    LOAD_STATE_RETURN_ON_ERROR(gate < 0 || gate >= st.num_gates);
+    LOAD_STATE_RETURN_ON_ERROR(gate >= st.num_gates);
 
     st.outputs[bit] = gate;
   }
