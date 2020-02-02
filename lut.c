@@ -30,104 +30,37 @@ static bool get_search_result(uint16_t *ret, int *quit_msg, MPI_Request *recv_re
 static inline int64_t n_choose_k(int n, int k);
 static inline void next_combination(gatenum *combination, int t, int max);
 
-/* Returns true if it is possible to generate a LUT with the three input truth tables and an output
-   truth table matching target in the positions where mask is set. */
-bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
-    const ttable t3) {
-  ttable match = {0};
-  ttable tt1 = ~t1;
-  for (uint8_t i = 0; i < 2; i++) {
-    ttable tt2 = ~t2;
-    for (uint8_t k = 0; k < 2; k++) {
-      ttable tt3 = ~t3;
-      for (uint8_t m = 0; m < 2; m++) {
-        ttable r = tt1 & tt2 & tt3;
-        if (ttable_equals_mask(target & r, r, mask)) {
-          match |= r;
-        } else if (!ttable_zero(target & r & mask)) {
-          return false;
-        }
-        tt3 = ~tt3;
-      }
-      tt2 = ~tt2;
+/* Called by check_n_lut_possible. */
+static bool check_n_lut_possible_recurse(const int num, const ttable target, const ttable mask,
+    const ttable *tables, ttable *match, ttable tt) {
+
+  if (num == 0) {
+    if (ttable_equals_mask(target & tt, tt, mask)) {
+      *match |= tt;
+    } else if (!ttable_zero(target & tt & mask)) {
+      return false;
     }
-    tt1 = ~tt1;
+    return true;
   }
-  return ttable_equals_mask(target, match, mask);
+
+  if (!check_n_lut_possible_recurse(num - 1, target, mask, tables + 1, match, tt & ~tables[0])) {
+    return false;
+  }
+  if (!check_n_lut_possible_recurse(num - 1, target, mask, tables + 1, match, tt & tables[0])) {
+    return false;
+  }
+
+  return true;
 }
 
-/* Returns true if it is possible to generate a LUT with the five input truth tables and an output
-   truth table matching target in the positions where mask is set. */
-bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
-    const ttable t3, const ttable t4, const ttable t5) {
+/* Returns true if it is possible to create a num input Boolean function with the specified input
+   truth tables that satisfies the target truth table, under the specified mask.*/
+bool check_n_lut_possible(const int num, const ttable target, const ttable mask,
+    const ttable *tables) {
   ttable match = {0};
-  ttable tt1 = ~t1;
-  for (uint8_t i = 0; i < 2; i++) {
-    ttable tt2 = ~t2;
-    for (uint8_t k = 0; k < 2; k++) {
-      ttable tt3 = ~t3;
-      for (uint8_t m = 0; m < 2; m++) {
-        ttable tt4 = ~t4;
-        for (uint8_t o = 0; o < 2; o++) {
-          ttable tt5 = ~t5;
-          for (uint8_t q = 0; q < 2; q++) {
-            ttable r = tt1 & tt2 & tt3 & tt4 & tt5;
-            if (ttable_equals_mask(target & r, r, mask)) {
-              match |= r;
-            } else if (!ttable_zero(target & r & mask)) {
-              return false;
-            }
-            tt5 = ~tt5;
-          }
-          tt4 = ~tt4;
-        }
-        tt3 = ~tt3;
-      }
-      tt2 = ~tt2;
-    }
-    tt1 = ~tt1;
-  }
-  return ttable_equals_mask(target, match, mask);
-}
-
-/* Returns true if it is possible to generate a LUT with the seven input truth tables and an output
-   truth table matching target in the positions where mask is set. */
-bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
-    const ttable t3, const ttable t4, const ttable t5, const ttable t6, const ttable t7) {
-  ttable match = {0};
-  ttable tt1 = ~t1;
-  for (uint8_t i = 0; i < 2; i++) {
-    ttable tt2 = ~t2;
-    for (uint8_t k = 0; k < 2; k++) {
-      ttable tt3 = ~t3;
-      for (uint8_t m = 0; m < 2; m++) {
-        ttable tt4 = ~t4;
-        for (uint8_t o = 0; o < 2; o++) {
-          ttable tt5 = ~t5;
-          for (uint8_t q = 0; q < 2; q++) {
-            ttable tt6 = ~t6;
-            for (uint8_t s = 0; s < 2; s++) {
-              ttable tt7 = ~t7;
-              for (uint8_t u = 0; u < 2; u++) {
-                ttable x = tt1 & tt2 & tt3 & tt4 & tt5 & tt6 & tt7;
-                if (ttable_equals_mask(target & x, x, mask)) {
-                  match |= x;
-                } else if (!ttable_zero(target & x & mask)) {
-                  return false;
-                }
-                tt7 = ~tt7;
-              }
-              tt6 = ~tt6;
-            }
-            tt5 = ~tt5;
-          }
-          tt4 = ~tt4;
-        }
-        tt3 = ~tt3;
-      }
-      tt2 = ~tt2;
-    }
-    tt1 = ~tt1;
+  ttable tt = ~match;
+  if (!check_n_lut_possible_recurse(num, target, mask, tables, &match, tt)) {
+    return false;
   }
   return ttable_equals_mask(target, match, mask);
 }
@@ -282,7 +215,7 @@ bool search_5lut(const state st, const ttable target, const ttable mask, const i
       }
     }
 
-    if (!rejected && check_5lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4])) {
+    if (!rejected && check_n_lut_possible(5, target, mask, tt)) {
       /* Try all 10 ways to build a 5LUT from two 3LUTs. */
       gatenum order[5] = {0, 1, 2, 3, 4};
       for (int k = 0; k < 10; k++) {
@@ -400,8 +333,7 @@ bool search_7lut(const state st, const ttable target, const ttable mask, const i
       }
     }
 
-    if (!rejected
-        && check_7lut_possible(target, mask, tt[0], tt[1], tt[2], tt[3], tt[4], tt[5], tt[6])) {
+    if (!rejected && check_n_lut_possible(7, target, mask, tt)) {
       result[p++] = nums[0];
       result[p++] = nums[1];
       result[p++] = nums[2];
@@ -602,7 +534,8 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
       for (int m = k + 1; m < st->num_gates; m++) {
         const gatenum gm = gate_order[m];
         const ttable tc = st->gates[gm].table;
-        if (!check_3lut_possible(target, mask, ta, tb, tc)) {
+        const ttable tables[] = {ta, tb, tc};
+        if (!check_n_lut_possible(3, target, mask, tables)) {
           continue;
         }
         uint8_t func;
@@ -657,7 +590,8 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
     printf("[   0] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n",
         func_outer, func_inner, a, b, c, d, e);
 
-    assert(check_5lut_possible(target, mask, ta, tb, tc, td, te));
+    const ttable tables[] = {ta, tb, tc, td, te};
+    assert(check_n_lut_possible(5, target, mask, tables));
     ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
     ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
     assert(ttable_equals_mask(target, t_inner, mask));
@@ -695,7 +629,8 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
     ttable tg = st->gates[g].table;
     printf("[   0] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n",
         func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
-    assert(check_7lut_possible(target, mask, ta, tb, tc, td, te, tf, tg));
+    const ttable tables[] = {ta, tb, tc, td, te, tf, tg};
+    assert(check_n_lut_possible(7, target, mask, tables));
     ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
     ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
     ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);

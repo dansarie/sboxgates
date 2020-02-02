@@ -452,7 +452,8 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         for (int m = k + 1; m < st->num_gates; m++) {
           const gatenum gm = gate_order[m];
           ttable tm = st->gates[gm].table & mask;
-          if (!check_3lut_possible(target, mask, ti, tk, tm)) {
+          ttable tables[] = {ti, tk, tm};
+          if (!check_n_lut_possible(3, target, mask, tables)) {
             continue;
           }
           if (ttable_equals(mtarget, iandk & tm)) {

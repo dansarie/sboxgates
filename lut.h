@@ -23,18 +23,10 @@
 #include "sboxgates.h"
 #include "state.h"
 
-/* Returns true if it is possible to generate a LUT with the three input truth tables and an output
-   truth table matching target in the positions where mask is set. */
-bool check_3lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
-    const ttable t3);
-
-/* Returns true if it is possible to generate a LUT with the five input truth tables and an output
-   truth table matching target in the positions where mask is set. */
-bool check_5lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
-    const ttable t3, const ttable t4, const ttable t5);
-
-bool check_7lut_possible(const ttable target, const ttable mask, const ttable t1, const ttable t2,
-    const ttable t3, const ttable t4, const ttable t5, const ttable t6, const ttable t7);
+/* Returns true if it is possible to create a num input Boolean function with the specified input
+   truth tables that satisfies the target truth table, under the specified mask.*/
+bool check_n_lut_possible(const int num, const ttable target, const ttable mask,
+    const ttable *tables);
 
 /* Calculates the truth table of a LUT given its function and three input truth tables. */
 ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
