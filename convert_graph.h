@@ -2,7 +2,7 @@
 
    Header file for graph conversion functions.
 
-   Copyright (c) 2019 Marcus Dansarie
+   Copyright (c) 2019-2020 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -26,9 +26,9 @@
 void print_ttable(ttable tbl);
 
 /* Prints a gate network to stdout in Graphviz dot format. */
-void print_digraph(const state st);
+void print_digraph(const state *st);
 
 /* Converts a gate network to a C function and prints it to stdout. */
-bool print_c_function(const state st);
+bool print_c_function(const state *st);
 
 #endif /* __CONVERT_GRAPH_H__ */

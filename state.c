@@ -29,6 +29,27 @@
 #include "sboxgates.h"
 #include "state.h"
 
+const char* const gate_name[] = {
+  "FALSE",
+  "AND",
+  "A_AND_NOT_B",
+  "A",
+  "NOT_A_AND_B",
+  "B",
+  "XOR",
+  "OR",
+  "NOR",
+  "XNOR",
+  "NOT_B",
+  "A_OR_NOT_B",
+  "NOT_A",
+  "NOT_A_OR_B",
+  "NAND",
+  "TRUE",
+  "IN",
+  "LUT"
+};
+
 static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
   pt1 = (pt1 >> 7) | (pt1 << 9);
   pt1 += pt2;
@@ -131,8 +152,8 @@ void save_state(state st) {
       case XOR:
         type = "XOR";
         break;
-      case ANDNOT:
-        type = "ANDNOT";
+      case A_AND_NOT_B:
+        type = "A_AND_NOT_B";
         break;
       case LUT:
         type = "LUT";
@@ -168,21 +189,27 @@ void save_state(state st) {
  * gate type will cause an assertion to fail. */
 int get_sat_metric(gate_type type) {
   switch (type) {
-    case IN:
-      return 0;
-    case NOT:
-      return 4;
-    case AND:
-    case OR:
-    case ANDNOT:
-      return 7;
-    case XOR:
-      return 12;
+    case FALSE_GATE:  return 1;
+    case AND:         return 7;
+    case A_AND_NOT_B: return 4;
+    case A:           return 4;
+    case NOT_A_AND_B: return 7;
+    case B:           return 4;
+    case XOR:         return 12;
+    case OR:          return 7;
+    case NOR:         return 7;
+    case XNOR:        return 12;
+    case NOT_B:       return 4;
+    case A_OR_NOT_B:  return 7;
+    case NOT_A:       return 4;
+    case NOT_A_OR_B:  return 7;
+    case NAND:        return 7;
+    case TRUE_GATE:   return 1;
+    case NOT:         return 4;
+    case IN:          return 0;
     case LUT:
-    default:
-      assert(0);
+    default:          assert(0);
   }
-  return 0;
 }
 
 #define LOAD_STATE_RETURN_ON_ERROR(X, Y)\
@@ -226,26 +253,16 @@ bool load_state(const char *name, state *return_state) {
     /* Parse type enum. */
     char *typestr = (char*)xmlGetProp(gate, (xmlChar*)"type");
     LOAD_STATE_RETURN_ON_ERROR(typestr == NULL, doc);
-    gate_type type;
-    if (strcmp(typestr, "IN") == 0) {
-      type = IN;
-    } else if (strcmp(typestr, "NOT") == 0) {
-      type = NOT;
-    } else if (strcmp(typestr, "AND") == 0) {
-      type = AND;
-    } else if (strcmp(typestr, "OR") == 0) {
-      type = OR;
-    } else if (strcmp(typestr, "ANDNOT") == 0) {
-      type = ANDNOT;
-    } else if (strcmp(typestr, "XOR") == 0) {
-      type = XOR;
-    } else if (strcmp(typestr, "LUT") == 0) {
-      type = LUT;
-    } else {
-      xmlFree(typestr);
-      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+    gate_type type = 0;
+    while (type <= LUT) {
+      if (strcmp(typestr, gate_name[type]) == 0) {
+        break;
+      }
     }
     xmlFree(typestr);
+    if (type > LUT) {
+      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+    }
     typestr = NULL;
 
     /* Parse LUT function. */
@@ -295,7 +312,7 @@ bool load_state(const char *name, state *return_state) {
     } else if (type == OR) {
       LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
       table = st.gates[inputs[0]].table | st.gates[inputs[1]].table;
-    } else if (type == ANDNOT) {
+    } else if (type == A_AND_NOT_B) {
       LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
       table = ~st.gates[inputs[0]].table & st.gates[inputs[1]].table;
     } else if (type == XOR) {

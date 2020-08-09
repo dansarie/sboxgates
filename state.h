@@ -27,8 +27,31 @@
 #define NO_GATE ((gatenum)-1)
 #define PRIgatenum PRIu16 /* Used in printf format strings. */
 
-typedef enum {IN, NOT, AND, OR, XOR, ANDNOT, LUT} gate_type;
+typedef enum {
+  FALSE_GATE,
+  AND,
+  A_AND_NOT_B,
+  A,
+  NOT_A_AND_B,
+  B,
+  XOR,
+  OR,
+  NOR,
+  XNOR,
+  NOT_B,
+  A_OR_NOT_B,
+  NOT_A,
+  NOT_A_OR_B,
+  NAND,
+  TRUE_GATE,
+  NOT,
+  IN,
+  LUT,
+  END = 0xff
+} gate_type;
 typedef enum {GATES, SAT} metric;
+
+extern const char* const gate_name[];
 
 /* 256 bit truth table. */
 #define TABLE_SIZE 256
