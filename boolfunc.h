@@ -27,7 +27,7 @@
 
 typedef struct {
   int num_inputs;
-  uint8_t fun;         /* Three-input boolean function. */
+  uint8_t fun;         /* Three-input boolean function. fun2(fun1(0xF0, 0xCC), 0xAA) */
   gate_type fun1;      /* Two-input boolean function 1. */
   gate_type fun2;      /* Two-input boolean function 2. */
   bool not_a;          /* True if NOT gate is appended to input A. */

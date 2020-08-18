@@ -86,8 +86,8 @@ int get_3_input_function_list(const boolfunc * restrict input_funs,
       uint8_t fun = 0;
       /* Compute truth table. */
       for (uint8_t val = 0; val < 8; val++) {
-        uint8_t ab = val >> 1;
-        uint8_t c = val & 1;
+        uint8_t ab = (7 - val) >> 1;
+        uint8_t c = (7 - val) & 1;
         fun <<= 1;
         fun |= get_val(input_funs[k].fun, get_val(input_funs[i].fun, ab) << 1 | c);
       }
@@ -113,6 +113,7 @@ int get_3_input_function_list(const boolfunc * restrict input_funs,
     int nfun = ~i & 0xff;
     if (funs[i].fun1 < 16 && funs[nfun].fun1 >= 16) {
       funs[nfun] = funs[i];
+      funs[nfun].fun = ~funs[nfun].fun;
       funs[nfun].not_out = true;
     }
   }

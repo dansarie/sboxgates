@@ -59,20 +59,30 @@ bool ttable_equals_mask(const ttable in1, const ttable in2, const ttable mask) {
 
 /* Adds a gate to the state st. Returns the gate id of the added gate. If an input gate is
    equal to NO_GATE (only gid1 in case of a NOT gate), NO_GATE will be returned. */
-static gatenum add_gate(state * restrict st, gate_type type, ttable table, gatenum gid1,
-    gatenum gid2, const options * restrict opt) {
-  if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT) || st->num_gates > st->max_gates) {
+static gatenum add_gate(state * restrict st, gate_type type, gatenum gid1, gatenum gid2,
+    const options * restrict opt) {
+  assert(!(type == NOT && gid2 != NO_GATE));
+  assert(type != IN && type != LUT);
+  assert(gid1 < st->num_gates);
+  assert(gid2 < st->num_gates || type == NOT);
+  assert(gid1 != gid2);
+  if (gid1 == NO_GATE || (gid2 == NO_GATE && type != NOT)) {
+    return NO_GATE;
+  }
+  if (st->num_gates > st->max_gates) {
     return NO_GATE;
   }
   if (opt->metric == SAT && st->sat_metric > st->max_sat_metric) {
     return NO_GATE;
   }
-  assert(type != IN && type != LUT);
-  assert(gid1 < st->num_gates);
-  assert(gid2 < st->num_gates || type == NOT);
-  assert(gid1 != gid2);
+
   st->sat_metric += get_sat_metric(type);
-  st->gates[st->num_gates].table = table;
+  if (type == NOT) {
+      st->gates[st->num_gates].table = ~st->gates[gid1].table;
+  } else {
+    st->gates[st->num_gates].table = generate_ttable_2(type, st->gates[gid1].table,
+        st->gates[gid2].table);
+  }
   st->gates[st->num_gates].type = type;
   st->gates[st->num_gates].in1 = gid1;
   st->gates[st->num_gates].in2 = gid2;
@@ -107,42 +117,42 @@ gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid1, gatenum gid
 
 /* The functions below are all calls to add_gate above added to improve code readability. */
 
-static inline gatenum add_not_gate(state *st, gatenum gid, const options *opt) {
+static gatenum add_not_gate(state *st, gatenum gid, const options *opt) {
   if (gid == NO_GATE) {
     return NO_GATE;
   }
-  return add_gate(st, NOT, ~st->gates[gid].table, gid, NO_GATE, opt);
+  return add_gate(st, NOT, gid, NO_GATE, opt);
 }
 
-static inline gatenum add_and_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+static gatenum add_and_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
   if (gid1 == gid2) {
     return gid1;
   }
-  return add_gate(st, AND, st->gates[gid1].table & st->gates[gid2].table, gid1, gid2, opt);
+  return add_gate(st, AND, gid1, gid2, opt);
 }
 
-static inline gatenum add_or_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+static gatenum add_or_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
   if (gid1 == gid2) {
     return gid1;
   }
-  return add_gate(st, OR, st->gates[gid1].table | st->gates[gid2].table, gid1, gid2, opt);
+  return add_gate(st, OR, gid1, gid2, opt);
 }
 
-static inline gatenum add_xor_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
+static gatenum add_xor_gate(state *st, gatenum gid1, gatenum gid2, const options *opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE) {
     return NO_GATE;
   }
-  return add_gate(st, XOR, st->gates[gid1].table ^ st->gates[gid2].table, gid1, gid2, opt);
+  return add_gate(st, XOR, gid1, gid2, opt);
 }
 
-static gatenum add_boolfunc_2(state * restrict st, const boolfunc * restrict fun, ttable table,
-    gatenum gid1, gatenum gid2, const options * restrict opt) {
+static gatenum add_boolfunc_2(state * restrict st, const boolfunc * restrict fun, gatenum gid1,
+    gatenum gid2, const options * restrict opt) {
   assert(fun->num_inputs == 2);
   if (gid1 == NO_GATE || gid2 == NO_GATE ||  st->num_gates > st->max_gates) {
     return NO_GATE;
@@ -160,13 +170,13 @@ static gatenum add_boolfunc_2(state * restrict st, const boolfunc * restrict fun
     gid2 = add_not_gate(st, gid2, opt);
   }
   if (fun->not_out) {
-    return add_not_gate(st, add_gate(st, fun->fun, table, gid1, gid2, opt), opt);
+    return add_not_gate(st, add_gate(st, fun->fun, gid1, gid2, opt), opt);
   }
-  return add_gate(st, fun->fun, table, gid1, gid2, opt);
+  return add_gate(st, fun->fun, gid1, gid2, opt);
 }
 
-static gatenum add_boolfunc_3(state * restrict st, const boolfunc * restrict fun, ttable table,
-    gatenum gid1, gatenum gid2, gatenum gid3, const options * restrict opt) {
+static gatenum add_boolfunc_3(state * restrict st, const boolfunc * restrict fun, gatenum gid1,
+    gatenum gid2, gatenum gid3, const options * restrict opt) {
   if (gid1 == NO_GATE || gid2 == NO_GATE || (gid3 == NO_GATE && fun->num_inputs == 3)
       || st->num_gates > st->max_gates) {
     return NO_GATE;
@@ -183,12 +193,11 @@ static gatenum add_boolfunc_3(state * restrict st, const boolfunc * restrict fun
   if (fun->not_c) {
     gid3 = add_not_gate(st, gid3, opt);
   }
-  ttable tt = generate_ttable_2(fun->fun1, st->gates[gid1].table, st->gates[gid2].table);
-  gatenum out1 = add_gate(st, fun->fun1, tt, gid1, gid2, opt);
+  gatenum out1 = add_gate(st, fun->fun1, gid1, gid2, opt);
   if (fun->not_out) {
-    return add_not_gate(st, add_gate(st, fun->fun2, table, out1, gid3, opt), opt);
+    return add_not_gate(st, add_gate(st, fun->fun2, out1, gid3, opt), opt);
   }
-  return add_gate(st, fun->fun2, table, out1, gid3, opt);
+  return add_gate(st, fun->fun2, out1, gid3, opt);
 }
 
 /* Returns the number of input gates in the state. */
@@ -312,14 +321,12 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       const gatenum gk = gate_order[k];
       const ttable tk = st->gates[gk].table;
       for (int m = 0; opt->avail_gates[m].num_inputs != 0; m++) {
-        ttable tt = generate_ttable_2(opt->avail_gates[m].fun, ti, tk);
-        if (ttable_equals_mask(mtarget, tt, mask)) {
-          return add_boolfunc_2(st, &opt->avail_gates[m], tt, gi, gk, opt);
+        if (ttable_equals(mtarget, generate_ttable_2(opt->avail_gates[m].fun, ti, tk))) {
+          return add_boolfunc_2(st, &opt->avail_gates[m], gi, gk, opt);
         }
         if (!opt->avail_gates[m].ab_commutative) {
-          tt = generate_ttable_2(opt->avail_gates[m].fun, tk, ti);
-          if (ttable_equals_mask(mtarget, tt, mask)) {
-            return add_boolfunc_2(st, &opt->avail_gates[m], tt, gk, gi, opt);
+          if (ttable_equals(mtarget, generate_ttable_2(opt->avail_gates[m].fun, tk, ti))) {
+            return add_boolfunc_2(st, &opt->avail_gates[m], gk, gi, opt);
           }
         }
       }
@@ -347,14 +354,12 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         const gatenum gk = gate_order[k];
         ttable tk = st->gates[gk].table;
         for (int m = 0; opt->avail_not[m].num_inputs != 0; m++) {
-          ttable tt = generate_ttable_2(opt->avail_not[m].fun, ti, tk);
-          if (ttable_equals_mask(mtarget, tt, mask)) {
-            return add_boolfunc_2(st, &opt->avail_not[m], tt, gi, gk, opt);
+          if (ttable_equals(mtarget, generate_ttable_2(opt->avail_not[m].fun, ti, tk))) {
+            return add_boolfunc_2(st, &opt->avail_not[m], gi, gk, opt);
           }
           if (!opt->avail_not[m].ab_commutative) {
-            tt = generate_ttable_2(opt->avail_not[m].fun, tk, ti);
-            if (ttable_equals_mask(mtarget, tt, mask)) {
-              return add_boolfunc_2(st, &opt->avail_not[m], tt, gk, gi, opt);
+            if (ttable_equals(mtarget, generate_ttable_2(opt->avail_not[m].fun, tk, ti))) {
+              return add_boolfunc_2(st, &opt->avail_not[m], gk, gi, opt);
             }
           }
         }
@@ -367,38 +372,34 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
     for (int i = 0; i < st->num_gates; i++) {
       const gatenum gi = gate_order[i];
-      ttable ti = st->gates[gi].table & mask;
+      ttable ti = st->gates[gi].table;
       for (int k = i + 1; k < st->num_gates; k++) {
         const gatenum gk = gate_order[k];
-        ttable tk = st->gates[gk].table & mask;
+        ttable tk = st->gates[gk].table;
         for (int m = k + 1; m < st->num_gates; m++) {
           const gatenum gm = gate_order[m];
-          ttable tm = st->gates[gm].table & mask;
+          ttable tm = st->gates[gm].table;
           const ttable tables[] = {ti, tk, tm};
           if (!check_n_lut_possible(3, target, mask, tables)) {
             continue;
           }
           for (int p = 0; opt->avail_3[p].num_inputs != 0; p++) {
-            ttable tt = generate_ttable_3(opt->avail_3[p], ti, tk, tm);
-            if (ttable_equals_mask(mtarget, tt, mask)) {
-              return add_boolfunc_3(st, &opt->avail_3[p], tt, gi, gk, gm, opt);
+            if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], ti, tk, tm), mask)) {
+              return add_boolfunc_3(st, &opt->avail_3[p], gi, gk, gm, opt);
             }
             if (!opt->avail_3[m].ab_commutative) {
-              tt = generate_ttable_3(opt->avail_3[p], tk, ti, tm);
-              if (ttable_equals_mask(mtarget, tt, mask)) {
-                return add_boolfunc_3(st, &opt->avail_3[p], tt, gk, gi, gm, opt);
+              if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], tk, ti, tm), mask)) {
+                return add_boolfunc_3(st, &opt->avail_3[p], gk, gi, gm, opt);
               }
             }
             if (!opt->avail_3[m].ac_commutative) {
-              tt = generate_ttable_3(opt->avail_3[p], tm, tk, ti);
-              if (ttable_equals_mask(mtarget, tt, mask)) {
-                return add_boolfunc_3(st, &opt->avail_3[p], tt, gm, gk, gi, opt);
+              if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], tm, tk, ti), mask)) {
+                return add_boolfunc_3(st, &opt->avail_3[p], gm, gk, gi, opt);
               }
             }
             if (!opt->avail_3[m].bc_commutative) {
-              tt = generate_ttable_3(opt->avail_3[p], ti, tm, tk);
-              if (ttable_equals_mask(mtarget, tt, mask)) {
-                return add_boolfunc_3(st, &opt->avail_3[p], tt, gi, gm, gk, opt);
+              if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], ti, tm, tk), mask)) {
+                return add_boolfunc_3(st, &opt->avail_3[p], gi, gm, gk, opt);
               }
             }
           }
@@ -491,10 +492,13 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       nst_and.max_sat_metric -= get_sat_metric(AND) + get_sat_metric(XOR);
 
       gatenum fb = create_circuit(&nst_and, target & ~fsel, mask & ~fsel, next_inbits, opt);
+      assert(fb == NO_GATE || ttable_equals_mask(target, nst_and.gates[fb].table, mask & ~fsel));
       gatenum mux_out_and = NO_GATE;
       if (fb != NO_GATE) {
         gatenum fc = create_circuit(&nst_and, nst_and.gates[fb].table ^ target, mask & fsel,
             next_inbits, opt);
+        assert(fc == NO_GATE || ttable_equals_mask(nst_and.gates[fb].table ^ target,
+            nst_and.gates[fc].table, mask & fsel));
         /* Add back subtracted max from above. */
         nst_and.max_gates += 2;
         nst_and.max_sat_metric += get_sat_metric(AND) + get_sat_metric(XOR);
@@ -515,10 +519,14 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       nst_or.max_sat_metric -= get_sat_metric(OR) + get_sat_metric(XOR);
 
       gatenum fd = create_circuit(&nst_or, ~target & fsel, mask & fsel, next_inbits, opt);
+      assert(fd == NO_GATE || ttable_equals_mask(~target & fsel, nst_or.gates[fd].table,
+          mask & fsel));
       gatenum mux_out_or = NO_GATE;
       if (fd != NO_GATE) {
         gatenum fe = create_circuit(&nst_or, nst_or.gates[fd].table ^ target, mask & ~fsel,
             next_inbits, opt);
+        assert(fe == NO_GATE || ttable_equals_mask(nst_or.gates[fd].table ^ target,
+            nst_or.gates[fe].table, mask & ~fsel));
         /* Add back subtracted max from above. */
         nst_or.max_gates += 2;
         nst_or.max_sat_metric += get_sat_metric(AND) + get_sat_metric(XOR);
