@@ -51,7 +51,7 @@ void print_digraph(const state *st) {
   printf("digraph sbox {\n");
   assert(st->num_gates < MAX_GATES);
   for (int gt = 0; gt < st->num_gates; gt++) {
-    char gatename[10];
+    char gatename[20];
     assert(st->gates[gt].type <= LUT);
     if (st->gates[gt].type == IN) {
       sprintf(gatename, "IN %d", gt);

@@ -46,6 +46,7 @@ const char* const gate_name[] = {
   "NOT_A_OR_B",
   "NAND",
   "TRUE",
+  "NOT",
   "IN",
   "LUT"
 };
@@ -235,6 +236,7 @@ bool load_state(const char *name, state *return_state) {
       if (strcmp(typestr, gate_name[type]) == 0) {
         break;
       }
+      type += 1;
     }
     xmlFree(typestr);
     if (type > LUT) {
@@ -275,26 +277,17 @@ bool load_state(const char *name, state *return_state) {
     }
 
     ttable table;
-    if (type == IN) {
+    if (type <= TRUE_GATE) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
+      table = generate_ttable_2(type, st.gates[inputs[0]].table, st.gates[inputs[1]].table);
+    } else if (type == NOT) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 1, doc);
+      table = ~st.gates[inputs[0]].table;
+    } else if (type == IN) {
       LOAD_STATE_RETURN_ON_ERROR(inp != 0, doc);
       LOAD_STATE_RETURN_ON_ERROR(st.num_gates >= 8, doc);
       LOAD_STATE_RETURN_ON_ERROR(st.num_gates != 0 && st.gates[st.num_gates - 1].type != IN, doc);
       table = generate_target(st.num_gates, false);
-    } else if (type == NOT) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 1, doc);
-      table = ~st.gates[inputs[0]].table;
-    } else if (type == AND) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = st.gates[inputs[0]].table & st.gates[inputs[1]].table;
-    } else if (type == OR) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = st.gates[inputs[0]].table | st.gates[inputs[1]].table;
-    } else if (type == A_AND_NOT_B) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = ~st.gates[inputs[0]].table & st.gates[inputs[1]].table;
-    } else if (type == XOR) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = st.gates[inputs[0]].table ^ st.gates[inputs[1]].table;
     } else if (type == LUT) {
       LOAD_STATE_RETURN_ON_ERROR(inp != 3, doc);
       table = generate_lut_ttable(func, st.gates[inputs[0]].table, st.gates[inputs[1]].table,
