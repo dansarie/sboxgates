@@ -135,32 +135,9 @@ void save_state(state st) {
     }
   }
   for (int i = 0; i < st.num_gates; i++) {
-    char *type = NULL;
-    switch (st.gates[i].type) {
-      case IN:
-        type = "IN";
-        break;
-      case NOT:
-        type = "NOT";
-        break;
-      case AND:
-        type = "AND";
-        break;
-      case OR:
-        type = "OR";
-        break;
-      case XOR:
-        type = "XOR";
-        break;
-      case A_AND_NOT_B:
-        type = "A_AND_NOT_B";
-        break;
-      case LUT:
-        type = "LUT";
-        break;
-      default:
-        assert(0);
-    }
+    const char *type = NULL;
+    assert(st.gates[i].type <= LUT);
+    type = gate_name[st.gates[i].type];
     if (st.gates[i].type == IN) {
       fprintf(fp, "  <gate type=\"IN\" />\n");
     } else {
