@@ -7,15 +7,30 @@ compiler:
 addons:
   apt:
     update: true
-
-before_install:
-  - sudo apt-get -y install libmpich-dev libxml2-dev mpich
-  - test -n $CC && unset CC
+    packages:
+      - libmpich-dev
+      - libxml2-dev
+      - mpich
 
 before_script:
   - mkdir build
   - cd build
   - cmake ..
 
-script:
-  - make
+jobs:
+  include:
+    - stage: Build
+      script: make
+    - stage: Test
+      script: mpirun ./sboxgates -b ../sboxes/identity.txt -vv -a 10694 -i 3
+      script: mpirun ./sboxgates -b ../sboxes/linear.txt -vv -a 10694 -i 3
+      script: mpirun ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -i 3
+      script: mpirun ./sboxgates -b ../sboxes/crypto1_fa.txt -vv -a 10694 -i 3
+      script: mpirun ./sboxgates -b ../sboxes/crypto1_fb.txt -vv -a 10694 -i 3
+      script: mpirun ./sboxgates -b ../sboxes/crypto1_fc.txt -vv -a 10694 -i 3
+      script: mpirun ./sboxgates -b ../sboxes/identity.txt -vv -i 3
+      script: mpirun ./sboxgates -b ../sboxes/linear.txt -vv -i 3
+      script: mpirun ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3
+      script: mpirun ./sboxgates -b ../sboxes/crypto1_fa.txt -vv -i 3
+      script: mpirun ./sboxgates -b ../sboxes/crypto1_fb.txt -vv -i 3
+      script: mpirun ./sboxgates -b ../sboxes/crypto1_fc.txt -vv -i 3
