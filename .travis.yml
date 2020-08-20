@@ -1,0 +1,19 @@
+language: c
+compiler:
+  - clang
+  - gcc
+
+addons:
+  apt:
+    packages:
+      - cmake
+      - libxml2-dev
+      - mpich
+
+before_script:
+  - mkdir build
+  - cd build
+  - cmake ..
+
+script:
+  - make
