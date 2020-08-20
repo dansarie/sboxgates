@@ -10,6 +10,9 @@ addons:
       - libxml2-dev
       - mpich
 
+before_install:
+  - test -n $CC && unset CC
+
 before_script:
   - mkdir build
   - cd build
