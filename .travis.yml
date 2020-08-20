@@ -9,7 +9,7 @@ addons:
     update: true
 
 before_install:
-  - sudo apt-get -y install libxml2-dev mpich
+  - sudo apt-get -y install libmpich-dev libxml2-dev mpich
   - test -n $CC && unset CC
 
 before_script:
