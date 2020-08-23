@@ -22,7 +22,7 @@ project(SBOXGATES VERSION 1.0.0 LANGUAGES C)
 find_package(MPI REQUIRED)
 find_package(LibXml2 REQUIRED)
 
-add_executable(sboxgates convert_graph.c lut.c sboxgates.c state.c)
+add_executable(sboxgates boolfunc.c convert_graph.c lut.c sboxgates.c state.c)
 include_directories(${LIBXML2_INCLUDE_DIR})
 target_include_directories(sboxgates PRIVATE ${MPI_C_INCLUDE_PATH})
 target_link_libraries(sboxgates ${MPI_C_LIBRARIES} ${MPI_C_LINK_FLAGS} ${LIBXML2_LIBRARIES})

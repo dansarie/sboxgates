@@ -24,12 +24,24 @@
   <xs:simpleType name="gate_type_type">
     <xs:restriction base="xs:string">
       <xs:minLength value="1" />
-      <xs:enumeration value="IN" />
-      <xs:enumeration value="NOT" />
+      <xs:enumeration value="FALSE" />
       <xs:enumeration value="AND" />
-      <xs:enumeration value="OR" />
+      <xs:enumeration value="A_AND_NOT_B" />
+      <xs:enumeration value="A" />
+      <xs:enumeration value="NOT_A_AND_B" />
+      <xs:enumeration value="B" />
       <xs:enumeration value="XOR" />
-      <xs:enumeration value="ANDNOT" />
+      <xs:enumeration value="OR" />
+      <xs:enumeration value="NOR" />
+      <xs:enumeration value="XNOR" />
+      <xs:enumeration value="NOT_B" />
+      <xs:enumeration value="A_OR_NOT_B" />
+      <xs:enumeration value="NOT_A" />
+      <xs:enumeration value="NOT_A_OR_B" />
+      <xs:enumeration value="NAND" />
+      <xs:enumeration value="TRUE" />
+      <xs:enumeration value="NOT" />
+      <xs:enumeration value="IN" />
       <xs:enumeration value="LUT" />
     </xs:restriction>
   </xs:simpleType>

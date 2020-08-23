@@ -19,6 +19,7 @@
 #define __SBOXGATES_H__
 
 #include <mpi.h>
+#include "boolfunc.h"
 #include "state.h"
 
 #define MAX_NAME_LEN (1000)
@@ -35,8 +36,12 @@ typedef struct {
    bool output_c;                /* Set to true to convert graph to C function. */
    bool output_dot;              /* Set to true to convert graph to DOT graph. */
    bool lut_graph;               /* Set to true to build 3LUT graph. */
-   bool andnot;                  /* Set to true to include ANDNOT gates. */
    bool randomize;               /* Set to true to use randomization at various steps. */
+   boolfunc avail_gates[17];     /* Available two-input gates. */
+   boolfunc avail_not[49];       /* Available two-input gates with inverted input/output. */
+   boolfunc avail_3[256];        /* Available three-input gates. */
+   int num_avail_3;              /* Number of available three-input gates. */
+   int verbosity;                /* How much information should be printed to the terminal. */
 } options;
 
 /* Used to broadcast work to be done by other MPI ranks. */

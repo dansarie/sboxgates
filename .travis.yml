@@ -1,0 +1,35 @@
+language: c
+dist: focal
+compiler:
+  - clang
+  - gcc
+
+addons:
+  apt:
+    update: true
+    packages:
+      - graphviz
+      - libmpich-dev
+      - libxml2-dev
+      - mpich
+      - nvidia-cuda-toolkit
+
+before_script:
+  - mkdir build
+  - cd build
+  - cmake ..
+
+script:
+  - make
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -o 0 -s
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -s -g 1*.xml
+  - rm *.xml
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -i 3 -p 63
+  - ./sboxgates -d 4*.xml | dot -Tpng > /dev/null
+  - ./sboxgates -c 4*.xml > test.c
+  - $CC -c -Wall -Wpedantic -Werror test.c
+  - rm *.xml *.c
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -l -o 0
+  - ./sboxgates -d 1*.xml | dot -Tpng > /dev/null
+  - ./sboxgates -c 1*.xml > test.cu
+  - nvcc -c test.cu

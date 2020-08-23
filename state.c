@@ -29,6 +29,28 @@
 #include "sboxgates.h"
 #include "state.h"
 
+const char* const gate_name[] = {
+  "FALSE",
+  "AND",
+  "A_AND_NOT_B",
+  "A",
+  "NOT_A_AND_B",
+  "B",
+  "XOR",
+  "OR",
+  "NOR",
+  "XNOR",
+  "NOT_B",
+  "A_OR_NOT_B",
+  "NOT_A",
+  "NOT_A_OR_B",
+  "NAND",
+  "TRUE",
+  "NOT",
+  "IN",
+  "LUT"
+};
+
 static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
   pt1 = (pt1 >> 7) | (pt1 << 9);
   pt1 += pt2;
@@ -114,32 +136,9 @@ void save_state(state st) {
     }
   }
   for (int i = 0; i < st.num_gates; i++) {
-    char *type = NULL;
-    switch (st.gates[i].type) {
-      case IN:
-        type = "IN";
-        break;
-      case NOT:
-        type = "NOT";
-        break;
-      case AND:
-        type = "AND";
-        break;
-      case OR:
-        type = "OR";
-        break;
-      case XOR:
-        type = "XOR";
-        break;
-      case ANDNOT:
-        type = "ANDNOT";
-        break;
-      case LUT:
-        type = "LUT";
-        break;
-      default:
-        assert(0);
-    }
+    const char *type = NULL;
+    assert(st.gates[i].type <= LUT);
+    type = gate_name[st.gates[i].type];
     if (st.gates[i].type == IN) {
       fprintf(fp, "  <gate type=\"IN\" />\n");
     } else {
@@ -168,21 +167,27 @@ void save_state(state st) {
  * gate type will cause an assertion to fail. */
 int get_sat_metric(gate_type type) {
   switch (type) {
-    case IN:
-      return 0;
-    case NOT:
-      return 4;
-    case AND:
-    case OR:
-    case ANDNOT:
-      return 7;
-    case XOR:
-      return 12;
+    case FALSE_GATE:  return 1;
+    case AND:         return 7;
+    case A_AND_NOT_B: return 4;
+    case A:           return 4;
+    case NOT_A_AND_B: return 7;
+    case B:           return 4;
+    case XOR:         return 12;
+    case OR:          return 7;
+    case NOR:         return 7;
+    case XNOR:        return 12;
+    case NOT_B:       return 4;
+    case A_OR_NOT_B:  return 7;
+    case NOT_A:       return 4;
+    case NOT_A_OR_B:  return 7;
+    case NAND:        return 7;
+    case TRUE_GATE:   return 1;
+    case NOT:         return 4;
+    case IN:          return 0;
     case LUT:
-    default:
-      assert(0);
+    default:          assert(0);
   }
-  return 0;
 }
 
 #define LOAD_STATE_RETURN_ON_ERROR(X, Y)\
@@ -226,26 +231,17 @@ bool load_state(const char *name, state *return_state) {
     /* Parse type enum. */
     char *typestr = (char*)xmlGetProp(gate, (xmlChar*)"type");
     LOAD_STATE_RETURN_ON_ERROR(typestr == NULL, doc);
-    gate_type type;
-    if (strcmp(typestr, "IN") == 0) {
-      type = IN;
-    } else if (strcmp(typestr, "NOT") == 0) {
-      type = NOT;
-    } else if (strcmp(typestr, "AND") == 0) {
-      type = AND;
-    } else if (strcmp(typestr, "OR") == 0) {
-      type = OR;
-    } else if (strcmp(typestr, "ANDNOT") == 0) {
-      type = ANDNOT;
-    } else if (strcmp(typestr, "XOR") == 0) {
-      type = XOR;
-    } else if (strcmp(typestr, "LUT") == 0) {
-      type = LUT;
-    } else {
-      xmlFree(typestr);
-      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+    gate_type type = 0;
+    while (type <= LUT) {
+      if (strcmp(typestr, gate_name[type]) == 0) {
+        break;
+      }
+      type += 1;
     }
     xmlFree(typestr);
+    if (type > LUT) {
+      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+    }
     typestr = NULL;
 
     /* Parse LUT function. */
@@ -281,26 +277,17 @@ bool load_state(const char *name, state *return_state) {
     }
 
     ttable table;
-    if (type == IN) {
+    if (type <= TRUE_GATE) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
+      table = generate_ttable_2(type, st.gates[inputs[0]].table, st.gates[inputs[1]].table);
+    } else if (type == NOT) {
+      LOAD_STATE_RETURN_ON_ERROR(inp != 1, doc);
+      table = ~st.gates[inputs[0]].table;
+    } else if (type == IN) {
       LOAD_STATE_RETURN_ON_ERROR(inp != 0, doc);
       LOAD_STATE_RETURN_ON_ERROR(st.num_gates >= 8, doc);
       LOAD_STATE_RETURN_ON_ERROR(st.num_gates != 0 && st.gates[st.num_gates - 1].type != IN, doc);
       table = generate_target(st.num_gates, false);
-    } else if (type == NOT) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 1, doc);
-      table = ~st.gates[inputs[0]].table;
-    } else if (type == AND) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = st.gates[inputs[0]].table & st.gates[inputs[1]].table;
-    } else if (type == OR) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = st.gates[inputs[0]].table | st.gates[inputs[1]].table;
-    } else if (type == ANDNOT) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = ~st.gates[inputs[0]].table & st.gates[inputs[1]].table;
-    } else if (type == XOR) {
-      LOAD_STATE_RETURN_ON_ERROR(inp != 2, doc);
-      table = st.gates[inputs[0]].table ^ st.gates[inputs[1]].table;
     } else if (type == LUT) {
       LOAD_STATE_RETURN_ON_ERROR(inp != 3, doc);
       table = generate_lut_ttable(func, st.gates[inputs[0]].table, st.gates[inputs[1]].table,
