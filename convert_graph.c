@@ -135,7 +135,7 @@ bool print_c_function(const state *st) {
         "\"r\"(##b), \"r\"(##c), \"r\"(##d));\n");
     printf("typedef uint %s;\n", TYPE);
   } else {
-    printf("typedef __m256i %s;\n", TYPE);
+    printf("typedef unsigned long long int %s;\n", TYPE);
   }
   printf("typedef struct {\n");
   for (int i = 0; i < get_num_inputs(st); i++) {

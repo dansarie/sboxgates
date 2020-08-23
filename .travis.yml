@@ -8,6 +8,7 @@ addons:
   apt:
     update: true
     packages:
+      - graphviz
       - libmpich-dev
       - libxml2-dev
       - mpich
@@ -19,15 +20,16 @@ before_script:
 
 script:
   - make
-  - mpirun ./sboxgates -b ../sboxes/identity.txt -vv -a 10694 -i 3
-  - mpirun ./sboxgates -b ../sboxes/linear.txt -vv -a 10694 -i 3
-  - mpirun ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -i 3
-  - mpirun ./sboxgates -b ../sboxes/crypto1_fa.txt -vv -a 10694 -i 3
-  - mpirun ./sboxgates -b ../sboxes/crypto1_fb.txt -vv -a 10694 -i 3
-  - mpirun ./sboxgates -b ../sboxes/crypto1_fc.txt -vv -a 10694 -i 3
-  - mpirun ./sboxgates -b ../sboxes/identity.txt -vv -i 3
-  - mpirun ./sboxgates -b ../sboxes/linear.txt -vv -i 3
-  - mpirun ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3
-  - mpirun ./sboxgates -b ../sboxes/crypto1_fa.txt -vv -i 3
-  - mpirun ./sboxgates -b ../sboxes/crypto1_fb.txt -vv -i 3
-  - mpirun ./sboxgates -b ../sboxes/crypto1_fc.txt -vv -i 3
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -o 0
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -g 1*.xml
+  - rm *.xml
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -i 3
+  - ./sboxgates -d 4*.xml | dot -Tpng > /dev/null
+  - ./sboxgates -c 4*.xml > test.c
+  - gcc -c -Wall -Wpedantic -Werror test.c
+  - rm *.xml *.c
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -l -o 0
+  - ./sboxgates -d 1*.xml | dot -Tpng > /dev/null
+  - ./sboxgates -c 1*.xml > test.c
+  - gcc -c -Wall -Wpedantic -Werror test.c
+  - rm *.xml *.c
