@@ -131,9 +131,9 @@ bool print_c_function(const state *st) {
   /* Generate type definitions. */
   const char TYPE[] = "bit_t";
   if (cuda) {
-    printf("#define LUT(a,b,c,d,e) asm(\"lop3.b32 %%0, %%1, %%2, %%3, \"#e\";\" : \"=r\"(##a): "
-        "\"r\"(##b), \"r\"(##c), \"r\"(##d));\n");
-    printf("typedef uint %s;\n", TYPE);
+    printf("#define LUT(a,b,c,d,e) asm(\"lop3.b32 %%0, %%1, %%2, %%3, \"#e\";\" : "
+        "\"=r\"(a): \"r\"(b), \"r\"(c), \"r\"(d));\n");
+    printf("typedef int %s;\n", TYPE);
   } else {
     printf("typedef unsigned long long int %s;\n", TYPE);
   }
@@ -212,6 +212,8 @@ bool print_c_function(const state *st) {
       case NAND:        printf("%s%s = ~(%s & %s);\n", start, var_out, var_in1, var_in2); break;
       case TRUE_GATE:   printf("%s%s = ~0;\n", start, var_out);                           break;
       case NOT:         printf("%s%s = ~%s;\n", start, var_out, var_in1);                 break;
+      case LUT:         printf("  %s %s; LUT(%s, %s, %s, %s, 0x%02x);\n", TYPE, var_out, var_out,
+          var_in1, var_in2, var_in3, st->gates[gate].function); break;
       default:          assert(0);
     }
 

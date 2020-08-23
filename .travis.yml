@@ -12,6 +12,7 @@ addons:
       - libmpich-dev
       - libxml2-dev
       - mpich
+      - nvidia-cuda-toolkit
 
 before_script:
   - mkdir build
@@ -26,10 +27,10 @@ script:
   - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -i 3
   - ./sboxgates -d 4*.xml | dot -Tpng > /dev/null
   - ./sboxgates -c 4*.xml > test.c
-  - gcc -c -Wall -Wpedantic -Werror test.c
+  - $CC -c -Wall -Wpedantic -Werror test.c
   - rm *.xml *.c
   - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -l -o 0
   - ./sboxgates -d 1*.xml | dot -Tpng > /dev/null
-  - ./sboxgates -c 1*.xml > test.c
-  - gcc -c -Wall -Wpedantic -Werror test.c
+  - ./sboxgates -c 1*.xml > test.cu
+  - nvcc -c test.cu
   - rm *.xml *.c
