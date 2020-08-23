@@ -1108,6 +1108,10 @@ bool load_sbox(uint8_t *sbox, uint32_t *num_inputs, const options *opt) {
   if (opt->permute == 0) {
     memcpy(sbox, target_sbox, sizeof(uint8_t) * 256);
   } else {
+    if (opt->permute >= (1 << *num_inputs)) {
+      fprintf(stderr, "Bad permutation value: %d (sboxgates.c:%d)\n", opt->permute, __LINE__);
+      return false;
+    }
     for (int i = 0; i < 256; i++) {
       sbox[i] = target_sbox[i ^ (uint8_t)opt->permute];
     }
