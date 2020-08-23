@@ -19,6 +19,8 @@ cmake_minimum_required (VERSION 3.10)
 
 project(SBOXGATES VERSION 1.0.0 LANGUAGES C)
 
+option(ENABLE_COVERAGE "Compile and link with gcov." OFF)
+
 find_package(MPI REQUIRED)
 find_package(LibXml2 REQUIRED)
 
@@ -28,5 +30,8 @@ target_include_directories(sboxgates PRIVATE ${MPI_C_INCLUDE_PATH})
 target_link_libraries(sboxgates ${MPI_C_LIBRARIES} ${MPI_C_LINK_FLAGS} ${LIBXML2_LIBRARIES})
 
 set(CMAKE_C_FLAGS "-march=native -Ofast -g -Wall -Wpedantic")
+if (ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage")
+endif (ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
 
 install(TARGETS sboxgates DESTINATION bin)

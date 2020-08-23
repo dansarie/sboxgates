@@ -14,10 +14,13 @@ addons:
       - mpich
       - nvidia-cuda-toolkit
 
+before_install:
+  - pip install --user cpp-coveralls
+
 before_script:
   - mkdir build
   - cd build
-  - cmake ..
+  - cmake -DENABLE_COVERAGE=ON ..
 
 script:
   - make
@@ -33,3 +36,6 @@ script:
   - ./sboxgates -d 1*.xml | dot -Tpng > /dev/null
   - ./sboxgates -c 1*.xml > test.cu
   - nvcc -c test.cu
+
+after_success:
+  - coveralls --gcov-options '\-lp'
