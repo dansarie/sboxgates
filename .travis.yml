@@ -1,7 +1,6 @@
 language: c
 dist: focal
 compiler:
-  - clang
   - gcc
 
 addons:
@@ -38,4 +37,5 @@ script:
   - nvcc -c test.cu
 
 after_success:
+  - cd ..
   - coveralls --gcov-options '\-lp'
