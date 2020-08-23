@@ -2,6 +2,7 @@
 [![DOI](https://zenodo.org/badge/79294181.svg)](https://zenodo.org/badge/latestdoi/79294181)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Build Status](https://travis-ci.com/dansarie/sboxgates.svg?branch=master)](https://travis-ci.com/dansarie/sboxgates)
+[![Coverage Status](https://coveralls.io/repos/github/dansarie/sboxgates/badge.svg)](https://coveralls.io/github/dansarie/sboxgates)
 
 Program for finding low gate count implementations of S-boxes.
 
