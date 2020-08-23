@@ -24,7 +24,7 @@
   <xs:simpleType name="gate_type_type">
     <xs:restriction base="xs:string">
       <xs:minLength value="1" />
-      <xs:enumeration value="FALSE_GATE" />
+      <xs:enumeration value="FALSE" />
       <xs:enumeration value="AND" />
       <xs:enumeration value="A_AND_NOT_B" />
       <xs:enumeration value="A" />
@@ -39,7 +39,7 @@
       <xs:enumeration value="NOT_A" />
       <xs:enumeration value="NOT_A_OR_B" />
       <xs:enumeration value="NAND" />
-      <xs:enumeration value="TRUE_GATE" />
+      <xs:enumeration value="TRUE" />
       <xs:enumeration value="NOT" />
       <xs:enumeration value="IN" />
       <xs:enumeration value="LUT" />
