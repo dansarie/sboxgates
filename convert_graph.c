@@ -158,7 +158,7 @@ bool print_c_function(const state *st) {
     }
   } else {
     if (num_outputs > 1) {
-      printf("static inline void s(bits in");
+      printf("void s(bits in");
       for (int outp = 0; outp < get_num_inputs(st); outp++) {
         if (st->outputs[outp] != NO_GATE) {
           printf(", %s *out%d", TYPE, outp);
@@ -166,7 +166,7 @@ bool print_c_function(const state *st) {
       }
       printf(") {\n");
     } else {
-      printf("static inline %s s%d(bits in) {\n", TYPE, outp_num);
+      printf("%s s%d(bits in) {\n", TYPE, outp_num);
     }
   }
 
