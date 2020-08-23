@@ -38,4 +38,4 @@ script:
 
 after_success:
   - cd ..
-  - coveralls --gcov-options '\-lp'
+  - coveralls --gcov-options '\-lp' -E '.*CMake.*'
