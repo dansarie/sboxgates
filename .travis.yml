@@ -23,6 +23,7 @@ before_script:
 
 script:
   - make
+  - ./sboxgates -h
   - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -o 0 -s
   - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -s -g 1*.xml
   - rm *.xml

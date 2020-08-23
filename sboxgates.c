@@ -101,9 +101,6 @@ gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid1, gatenum gid
   assert(gid1 < st->num_gates);
   assert(gid2 < st->num_gates);
   assert(gid3 < st->num_gates);
-  if (gid1 == gid2 || gid2 == gid3 || gid3 == gid1) {
-    printf("%d %d %d\n", gid1, gid2, gid3);
-  }
   assert(gid1 != gid2 && gid2 != gid3 && gid3 != gid1);
   st->gates[st->num_gates].table = table;
   st->gates[st->num_gates].type = LUT;
