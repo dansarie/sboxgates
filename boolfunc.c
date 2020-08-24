@@ -77,32 +77,36 @@ int get_3_input_function_list(const boolfunc * restrict input_funs,
   boolfunc funs[256];
   memset(funs, 0xff, sizeof(boolfunc) * 256);
 
+
+  uint8_t nots[] = {0, 1, 2, 4, 3, 5, 6, 7};
   /* Iterate over all combinations of two two-input boolean functions. */
-  for (int i = 0; input_funs[i].num_inputs != 0; i++) {
-    for (int k = 0; input_funs[k].num_inputs != 0; k++) {
-      assert(input_funs[k].num_inputs == 2);
-      assert(input_funs[k].fun == input_funs[k].fun1);
-      assert(input_funs[k].fun < 16);
-      uint8_t fun = 0;
-      /* Compute truth table. */
-      for (uint8_t val = 0; val < 8; val++) {
-        uint8_t ab = (7 - val) >> 1;
-        uint8_t c = (7 - val) & 1;
-        fun <<= 1;
-        fun |= get_val(input_funs[k].fun, get_val(input_funs[i].fun, ab) << 1 | c);
-      }
-      if (funs[fun].fun >= 16) { /* If function isn't already set. */
-        funs[fun].num_inputs = 3;
-        funs[fun].fun = fun;
-        funs[fun].fun1 = input_funs[i].fun;
-        funs[fun].fun2 = input_funs[k].fun;
-        funs[fun].not_a = false;
-        funs[fun].not_b = false;
-        funs[fun].not_c = false;
-        funs[fun].not_out = false;
-        funs[fun].ab_commutative = ~(fun >> 2 ^ fun >> 4) & ~(fun >> 3 ^ fun >> 5) & 1;
-        funs[fun].ac_commutative = ~(fun >> 1 ^ fun >> 4) & ~(fun >> 3 ^ fun >> 6) & 1;
-        funs[fun].bc_commutative = ~(fun >> 1 ^ fun >> 2) & ~(fun >> 5 ^ fun >> 6) & 1;
+  for (int notsp = 0; notsp < 8; notsp++) {
+    for (int i = 0; input_funs[i].num_inputs != 0; i++) {
+      for (int k = 0; input_funs[k].num_inputs != 0; k++) {
+        assert(input_funs[k].num_inputs == 2);
+        assert(input_funs[k].fun == input_funs[k].fun1);
+        assert(input_funs[k].fun < 16);
+        uint8_t fun = 0;
+        /* Compute truth table. */
+        for (uint8_t val = 0; val < 8; val++) {
+          uint8_t ab = ((7 - val) ^ nots[notsp]) >> 1;
+          uint8_t c = ((7 - val) ^ nots[notsp]) & 1;
+          fun <<= 1;
+          fun |= get_val(input_funs[k].fun, get_val(input_funs[i].fun, ab) << 1 | c);
+        }
+        if (funs[fun].fun >= 16) { /* If function isn't already set. */
+          funs[fun].num_inputs = 3;
+          funs[fun].fun = fun;
+          funs[fun].fun1 = input_funs[i].fun;
+          funs[fun].fun2 = input_funs[k].fun;
+          funs[fun].not_a = (nots[notsp] & 4) != 0;
+          funs[fun].not_b = (nots[notsp] & 2) != 0;
+          funs[fun].not_c = (nots[notsp] & 1) != 0;
+          funs[fun].not_out = false;
+          funs[fun].ab_commutative = ~(fun >> 2 ^ fun >> 4) & ~(fun >> 3 ^ fun >> 5) & 1;
+          funs[fun].ac_commutative = ~(fun >> 1 ^ fun >> 4) & ~(fun >> 3 ^ fun >> 6) & 1;
+          funs[fun].bc_commutative = ~(fun >> 1 ^ fun >> 2) & ~(fun >> 5 ^ fun >> 6) & 1;
+        }
       }
     }
   }

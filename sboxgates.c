@@ -151,14 +151,11 @@ static gatenum add_xor_gate(state *st, gatenum gid1, gatenum gid2, const options
 static gatenum add_boolfunc_2(state * restrict st, const boolfunc * restrict fun, gatenum gid1,
     gatenum gid2, const options * restrict opt) {
   assert(fun->num_inputs == 2);
-  if (gid1 == NO_GATE || gid2 == NO_GATE ||  st->num_gates > st->max_gates) {
+  if (gid1 == NO_GATE || gid2 == NO_GATE || st->num_gates > st->max_gates) {
     return NO_GATE;
   }
   if (opt->metric == SAT && st->sat_metric > st->max_sat_metric) {
     return NO_GATE;
-  }
-  if (opt->verbosity >= 2) {
-    printf("Adding %s(%d, %d)\n", gate_name[fun->fun], gid1, gid2);
   }
   if (fun->not_a) {
     gid1 = add_not_gate(st, gid1, opt);
@@ -1062,6 +1059,10 @@ bool parse_options(int argc, char **argv, options *opt, int *retval) {
     printf("\nGenerated gates: ");
     for (int i = 0; opt->avail_not[i].num_inputs != 0; i++) {
       printf("%s ", gate_name[opt->avail_not[i].fun]);
+    }
+    printf("\nGenerated 3-input gates: ");
+    for (int i = 0; opt->avail_3[i].num_inputs != 0; i++) {
+      printf("%02x ", opt->avail_3[i].fun);
     }
     printf("\n");
   }
