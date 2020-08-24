@@ -37,6 +37,7 @@ typedef struct {
    bool output_dot;              /* Set to true to convert graph to DOT graph. */
    bool lut_graph;               /* Set to true to build 3LUT graph. */
    bool randomize;               /* Set to true to use randomization at various steps. */
+   bool try_nots;                /* Set to true to generate functions by appending NOT gates. */
    boolfunc avail_gates[17];     /* Available two-input gates. */
    boolfunc avail_not[49];       /* Available two-input gates with inverted input/output. */
    boolfunc avail_3[256];        /* Available three-input gates. */

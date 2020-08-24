@@ -885,6 +885,7 @@ void print_command_help(const char *name) {
             "-i n      Do n iterations per step.\n"
             "-l        Generate LUT graph. Results in smaller graphs but takes significantly\n"
             "          longer time.\n"
+            "-n        Try to generate more boolean functions by appending NOT gates.\n"
             "-o n      Generate one-output graph for output n.\n"
             "-p value  Permute sbox by XORing input with value.\n"
             "-s        Use SAT metric to optimize the generated graph for use with SAT\n"
@@ -939,7 +940,7 @@ bool parse_options(int argc, char **argv, options *opt, int *retval) {
   opt->randomize = true;
   create_avail_gates(2 + 64 + 128, opt); /* AND + OR + XOR */
 
-  char opts[] = "a:b:c:d:g:hi:lo:p:sv";
+  char opts[] = "a:b:c:d:g:hi:lno:p:sv";
 
   int c, avail_gates;
   char *endptr;
@@ -992,6 +993,9 @@ bool parse_options(int argc, char **argv, options *opt, int *retval) {
       /* Generate 3LUT graph. */
       case 'l':
         opt->lut_graph = true;
+        break;
+      case 'n':
+        opt->try_nots = true;
         break;
       /* Generate single-output graph. */
       case 'o':
@@ -1046,9 +1050,12 @@ bool parse_options(int argc, char **argv, options *opt, int *retval) {
   }
 
   /* Create derived boolean functions. */
-  int num = get_not_functions(opt->avail_gates, opt->avail_not);
+  int num = 0;
+  if (opt->try_nots) {
+    num = get_not_functions(opt->avail_gates, opt->avail_not);
+  }
   memset(opt->avail_not + num, 0, sizeof(boolfunc));
-  num = get_3_input_function_list(opt->avail_gates, opt->avail_3);
+  num = get_3_input_function_list(opt->avail_gates, opt->avail_3, opt->try_nots);
   memset(opt->avail_3 + num, 0, sizeof(boolfunc));
 
   if (opt->verbosity >= 1) {

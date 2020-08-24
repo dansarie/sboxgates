@@ -55,9 +55,10 @@ int get_not_functions(const boolfunc * restrict input_funs,
 /* Generates a list of unique three-input boolean functions from a list of available two-input
    boolean functions. Returns the number of functions in output_fun.
    input_funs  - array of input functions, terminated with END.
-   output_funs - output array. Will contain num_inputs^2 members at most on return. */
+   output_funs - output array. Will contain num_inputs^2 members at most on return.
+   try_nots    - set to true to append NOT gates in order to find more 3-input functions. */
 int get_3_input_function_list(const boolfunc * restrict input_funs,
-    boolfunc * restrict output_funs);
+    boolfunc * restrict output_funs, bool try_nots);
 
 /* Generates the truth table for a two-input gate.
    fun - the gate function.

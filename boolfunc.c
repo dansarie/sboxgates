@@ -71,7 +71,7 @@ boolfunc create_2_input_fun(uint8_t fun) {
 }
 
 int get_3_input_function_list(const boolfunc * restrict input_funs,
-    boolfunc * restrict output_funs) {
+    boolfunc * restrict output_funs, bool try_nots) {
   assert(input_funs != NULL);
   assert(output_funs != NULL);
   boolfunc funs[256];
@@ -80,7 +80,7 @@ int get_3_input_function_list(const boolfunc * restrict input_funs,
 
   uint8_t nots[] = {0, 1, 2, 4, 3, 5, 6, 7};
   /* Iterate over all combinations of two two-input boolean functions. */
-  for (int notsp = 0; notsp < 8; notsp++) {
+  for (int notsp = 0; notsp < (try_nots ? 8 : 1); notsp++) {
     for (int i = 0; input_funs[i].num_inputs != 0; i++) {
       for (int k = 0; input_funs[k].num_inputs != 0; k++) {
         assert(input_funs[k].num_inputs == 2);
@@ -113,12 +113,14 @@ int get_3_input_function_list(const boolfunc * restrict input_funs,
 
   /* Attempt to create new functions by appending a NOT gate to the output of those already
      discovered. */
-  for (int i = 0; i < 256; i++) {
-    int nfun = ~i & 0xff;
-    if (funs[i].fun1 < 16 && funs[nfun].fun1 >= 16) {
-      funs[nfun] = funs[i];
-      funs[nfun].fun = ~funs[nfun].fun;
-      funs[nfun].not_out = true;
+  if (try_nots) {
+    for (int i = 0; i < 256; i++) {
+      int nfun = ~i & 0xff;
+      if (funs[i].fun1 < 16 && funs[nfun].fun1 >= 16) {
+        funs[nfun] = funs[i];
+        funs[nfun].fun = ~funs[nfun].fun;
+        funs[nfun].not_out = true;
+      }
     }
   }
 
