@@ -19,9 +19,9 @@ before_install:
 before_script:
   - mkdir build
   - cd build
-  - cmake -DENABLE_COVERAGE=ON ..
 
 script:
+  - cmake -DENABLE_COVERAGE=ON ..
   - make
   - ./sboxgates -h
   - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -o 0 -s
