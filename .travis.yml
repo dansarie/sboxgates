@@ -24,8 +24,8 @@ script:
   - cmake -DENABLE_COVERAGE=ON ..
   - make
   - ./sboxgates -h
-  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -o 0 -s
-  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -s -g 1*.xml
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -o 0 -s -n
+  - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -i 3 -s -n -g 1*.xml
   - rm *.xml
   - mpirun -N 4 ./sboxgates -b ../sboxes/des_s1.txt -vv -a 10694 -i 3 -p 63
   - ./sboxgates -d 4*.xml | dot -Tpng > /dev/null
