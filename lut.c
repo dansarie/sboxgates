@@ -306,7 +306,7 @@ bool search_7lut(const state st, const ttable target, const ttable mask, const i
   }
 
   gatenum nums[7];
-  if (start > n_choose_k(st.num_gates, 7)) {
+  if (start >= n_choose_k(st.num_gates, 7)) {
     memset(nums, 0, sizeof(gatenum) * 7);
   } else {
     get_nth_combination(start, st.num_gates, 7, 0, nums);
