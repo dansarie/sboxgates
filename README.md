@@ -13,6 +13,20 @@ supports searching for gates using any subset of the 16 standard two-input boole
 Additionally, the program also supports 3-bit LUTs. The latter can be used to find efficient
 implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 
+* [Dependencies](#dependencies)
+* [Build](#build)
+* [Run](#run)
+  * [Command examples](#command-examples)
+  * [Single output](#single-output)
+  * [Multiple iterations](#multiple-iterations)
+  * [Selecting gates](#selecting-gates)
+  * [Metrics](#metrics)
+  * [Permuting S-boxes](#permuting-s-boxes)
+* [License](#license)
+
+#### Graph representation of output bit 0 of DES S1 generated with sboxgates and Graphviz
+![Graph representation of output bit 0 of DES S1](des_s1_bit0.svg)
+
 ## Dependencies
 
 * [CMake](https://github.com/Kitware/CMake) (for build)
@@ -32,7 +46,28 @@ make
 
 ## Run
 
-The `--help` command line argument will display a brief list of command line options.
+This program uses MPI for parallelization and should generally be run with the mpirun utility.
+Graph generation without LUTs (i.e. without the `--lut` argument) is not parallelized and the
+program can safely be run without MPI in those cases.
+
+The `--help` command line argument will display a brief list of command line options. The only
+required argument is the path of an S-box file. S-box files are text files that contain an S-box
+lookup table in hex format, with the values separated by whitespace. See
+[rijndael.txt](sboxes/rijndael.txt) for how the
+[AES S-box](https://en.wikipedia.org/wiki/Rijndael_S-box) is represented.
+
+Generated graphs are saved as XML files, using the schema specified in [gates.xsd](gates.xsd). They
+should be fairly easy to understand since each gate in the generated graph is represented by one
+tag. The output files are named according to the pattern A-B-C-D-E.xml where A is the
+number of output bits, B the number of gates, C the SAT metric (if applicable), D the output bit
+numbers in the order they were added to the graph, and E a simple hash of the particular graph.
+
+The program can convert the XML files to C or CUDA functions. This is enabled by the `-c`
+argument. Graphs that include at least one LUT are converted to CUDA functions and graphs without
+LUTs are converted to C functions. For visualization of the generated graphs, they can be converted
+to Graphviz DOT format with the `-d` argument.
+
+### Command examples
 
 Generate a logic circuit representation of the Rijndael S-box:
 ```
@@ -54,13 +89,36 @@ Convert a generated circuit to C/CUDA:
 ./sboxgates -c 1-067-162-3-c32281db.xml > 1-067-162-3-c32281db.c
 ```
 
+### Single output
+
+It is possible to generate graphs for just a single output bit of the S-box by using the
+`--single-output` argument followed by a bit number. The least significant output bit is bit 0. This
+can, for example, be used to generate separate functions for each single bit in an S-box to reduce
+register pressure in bitslicing implementations.
+
+Graphs can be built one output at a time by combining the `--single-output` with `--graph` to load
+a previously generated graph. This can be used to manually control the build order and to keep the
+total build time down.
+
+### Multiple iterations
+
+The `--iterations` argument can be used to make the program do more than one search iteration for
+each output bit. This will often result in smaller output graphs being found, at the cost of much
+longer search time. It is most suitable for use together with `--single-output`.
+
 ### Selecting gates
 
 The `--available-gates` command line argument is used to specify the two-input gates gates that are
 available for the search. The argument value is a bitfield, where each bit represents one gate
 type. To specify the gates to be used, add up their values from the table below and pass the sum as
 the value of the `--available-gates` argument. If no such argument is specified, the default is
-194, i.e. AND, OR, and XOR.
+194, i.e. AND, OR, and XOR. The `--append-not` flag can also be used to increase the number of
+gates used for the search, by artificially creating NOT-versions of the available gates. This can
+both increase and decrease the size of generated graphs.
+
+When the `--verbose` flag is used, the program starts by printing out the 2- and 3-input gates that
+have been generated and will be used for the search. Generation with LUTs will always include all
+3-input gates, regardless of the result of this generation.
 
 | Gate        | Value |
 | ----------- | ----- |
@@ -80,6 +138,20 @@ the value of the `--available-gates` argument. If no such argument is specified,
 | NOT A OR B  |  8192 |
 | NAND        | 16384 |
 | TRUE        | 32768 |
+
+### Metrics
+
+The default metric used in the search is the number of gates in the generated graph. An alternative
+metric can be selected with the `--sat-metric` argument. Instead of minimizing the number of gates,
+it attempts to minimizing the size of the
+[CNF](https://en.wikipedia.org/wiki/Conjunctive_normal_form) representation of the generated graph.
+It is meant to improve the performance when the graph is used with
+[SAT](https://en.wikipedia.org/wiki/Boolean_satisfiability_problem) solvers.
+
+### Permuting S-boxes
+
+The `--permute` argument can be used to permute the S-box input by XORing it with a constant value,
+so that the S-box value for input value I becomes S(I ^ V), where V is the permutation value.
 
 ## License
 
