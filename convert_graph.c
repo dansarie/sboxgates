@@ -55,7 +55,7 @@ void print_digraph(const state *st) {
     assert(st->gates[gt].type <= LUT);
     if (st->gates[gt].type == IN) {
       sprintf(gatename, "IN %d", gt);
-    } if (st->gates[gt].type == LUT) {
+    } else if (st->gates[gt].type == LUT) {
       sprintf(gatename, "0x%02x", st->gates[gt].function);
     } else {
       strcpy(gatename, gate_name[st->gates[gt].type]);
