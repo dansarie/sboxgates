@@ -24,19 +24,19 @@ script:
   - cmake -DENABLE_COVERAGE=ON ..
   - make
   - ./sboxgates --help
-  - ! ./sboxgates
-  - ! ./sboxgates -a -123 ../sboxes/des_s1.txt
-  - ! ./sboxgates -a 65536 ../sboxes/des_s1.txt
-  - ! ./sboxgates -i 0 ../sboxes/des_s1.txt
-  - ! ./sboxgates -i -123 ../sboxes/des_s1.txt
-  - ! ./sboxgates -o -123 ../sboxes/des_s1.txt
-  - ! ./sboxgates -o 8 ../sboxes/des_s1.txt
-  - ! ./sboxgates -p -123 ../sboxes/des_s1.txt
-  - ! ./sboxgates -p 256 ../sboxes/des_s1.txt
-  - ! ./sboxgates -c -d test.xml
-  - ! ./sboxgates -l -s ../sboxes/des_s1.txt
-  . ! ./sboxgates nonexisting.txt
-  - ! ./sboxgates -o 7 ../sboxes/des_s1.txt
+  - '! ./sboxgates'
+  - '! ./sboxgates -a -123 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -a 65536 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -i 0 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -i -123 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -o -123 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -o 8 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -p -123 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -p 256 ../sboxes/des_s1.txt'
+  - '! ./sboxgates -c -d test.xml'
+  - '! ./sboxgates -l -s ../sboxes/des_s1.txt'
+  - '! ./sboxgates nonexisting.txt'
+  - '! ./sboxgates -o 7 ../sboxes/des_s1.txt'
   - mpirun -N 4 ./sboxgates -vv -i 3 -o 0 -s -n ../sboxes/des_s1.txt
   - mpirun -N 4 ./sboxgates -vv -i 3 -s -n -g 1*.xml ../sboxes/des_s1.txt
   - rm *.xml
