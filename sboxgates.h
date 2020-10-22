@@ -26,9 +26,8 @@
 
 /* Holds all options set by the user. */
 typedef struct {
-   char fname[MAX_NAME_LEN];     /* Graph file name for generating C or DOT output. */
+   char fname[MAX_NAME_LEN];     /* Input file name. */
    char gfname[MAX_NAME_LEN];    /* Partial graph file name. */
-   char sboxfname[MAX_NAME_LEN]; /* S-box file name */
    int iterations;               /* Number of iterations per step. */
    int oneoutput;                /* Set to 0-8 if only one output should be generated, else -1. */
    int permute;                  /* Set to 1-255 if S-box should be XOR permuted. */

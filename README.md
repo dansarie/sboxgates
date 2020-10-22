@@ -32,16 +32,16 @@ make
 
 ## Run
 
-The `-h` command line argument will display a brief list of command line options.
+The `--help` command line argument will display a brief list of command line options.
 
 Generate a logic circuit representation of the Rijndael S-box:
 ```
-./sboxgates -b sboxes/rijndael.txt
+./sboxgates ../sboxes/rijndael.txt
 ```
 
 Generate a LUT circuit for output bit 0 of the Rijndael S-box:
 ```
-mpirun ./sboxgates -l -o 0 -b sboxes/rijndael.txt
+mpirun ./sboxgates --lut --single-output 0 ../sboxes/rijndael.txt
 ```
 
 Visualize a generated circuit with Graphviz:
@@ -56,10 +56,11 @@ Convert a generated circuit to C/CUDA:
 
 ### Selecting gates
 
-The `-a` command line argument is used to specify the two-input gates gates that are available for
-the search. The argument value is a bitfield, where each bit represents one gate type. To specify
-the gates to be used, add up their values from the table below and pass the sum as the value of
-the `-a` argument. If no `-a` argument is specified, the default is 194, i.e. AND, OR, and XOR.
+The `--available-gates` command line argument is used to specify the two-input gates gates that are
+available for the search. The argument value is a bitfield, where each bit represents one gate
+type. To specify the gates to be used, add up their values from the table below and pass the sum as
+the value of the `--available-gates` argument. If no such argument is specified, the default is
+194, i.e. AND, OR, and XOR.
 
 | Gate        | Value |
 | ----------- | ----- |

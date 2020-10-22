@@ -20,6 +20,7 @@
    You should have received a copy of the GNU General Public License
    along with this program. If not, see <http://www.gnu.org/licenses/>. */
 
+#include <argp.h>
 #include <assert.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -36,6 +37,38 @@
 
 uint8_t g_sbox_enc[256];      /* Target S-box. */
 ttable g_target[8];           /* Truth tables for the output bits of the sbox. */
+
+const char *argp_program_version = "sboxgates 1.0";
+const char *argp_program_bug_address = "https://github.com/dansarie/sboxgates/issues";
+const char doc[] = "Generates graphs of Boolean gates or 3-input LUTs that realize a specified "
+    "S-box. Generated graphs can be converted to C/CUDA source code or to Graphviz DOT format.\v"
+    "This program uses MPI for parallellization and should therefore be run using the mpirun "
+    "utility. Generated graphs are output as XML files. In its basic mode, the program generates a "
+    "single graph for all outputs of the S-box. It is also possible to generate separate graphs "
+    "for each output, which can significantly decrease the time to generate the graph. ";
+const char args_doc[] = "INPUT_FILE";
+struct argp_option argp_options[] = {
+  {0,                1000,            0, 0, "Graph generation", 1},
+  {"available-gates", 'a', "gates",      0, "Specify the set of available gates "
+                                            "(bitfield 0-65535).", 1},
+  {"graph",           'g', "graph",      0, "Load graph from file as initial state. "
+                                            "(For use with -o.)", 1},
+  {"iterations",      'i', "iterations", 0, "Set number of iterations per step.", 1},
+  {"lut",             'l',            0, 0, "Generate LUT graph. Results in smaller graphs but "
+                                            "takes significantly more time.", 1},
+  {"append-not",      'n',            0, 0, "Try to generate more boolean functions by appending "
+                                            "NOT gates.", 1},
+  {"single-output",   'o', "output",     0, "Generate single-output graph for specified output.",
+      1},
+  {"permute",         'p', "value",      0, "Permute the input S-box by XORing it with value.", 1},
+  {"sat-metric",      's',            0, 0, "Use graph size metric which attempts to optimize the "
+                                            "generated graph for use with SAT solvers.", 1},
+  {"verbose",         'v',            0, 0, "Increase verbosity.", 1},
+  {0,                1001,            0, 0, "Graph conversion", 2},
+  {"convert-c",       'c',            0, 0, "Convert input file to a C or CUDA function.", 2},
+  {"convert-dot",     'd',            0, 0, "Convert input file to a DOT digraph.", 2},
+  {0}
+};
 
 /* Returns true if the truth table is all-zero. */
 bool ttable_zero(ttable tt) {
@@ -863,218 +896,110 @@ static void create_avail_gates(uint16_t gates, options *opt) {
   }
 }
 
-/* Print the program usage help to stdout. */
-void print_command_help(const char *name) {
-  assert(name != NULL);
-  printf(
-            "\nsboxgates generates graphs of Boolean gates or 3-input LUTs that realize a\n"
-            "specified S-box. The program uses MPI for parallellization and should therefore\n"
-            "be run using the mpirun utility. Generated graphs are output as XML files.\n"
-            "In its basic mode, the program generates a single graph for all outputs of the\n"
-            "S-box. It is also possible to generate separate graphs for each output, which\n"
-            "can significantly decrease the time to generate the graph.\n\n"
-
-            "Generated graphs can be converted to C/CUDA source code or to Graphviz DOT\n"
-            "format.\n\n"
-
-            "Arguments:\n"
-            "-a num    Sets available gates (bitfield 0-65535)\n"
-            "-b file   Target S-box definition file. (Mandatory)\n"
-            "-g file   Load graph from file as initial state. (For use with -o.)\n"
-            "-h        Display this help.\n"
-            "-i n      Do n iterations per step.\n"
-            "-l        Generate LUT graph. Results in smaller graphs but takes significantly\n"
-            "          longer time.\n"
-            "-n        Try to generate more boolean functions by appending NOT gates.\n"
-            "-o n      Generate one-output graph for output n.\n"
-            "-p value  Permute sbox by XORing input with value.\n"
-            "-s        Use SAT metric to optimize the generated graph for use with SAT\n"
-            "          solvers.\n"
-            "-v        Increase verbosity.\n\n"
-
-            "Graph conversion arguments, used alone:\n"
-            "-c file   Convert file to C/CUDA function.\n"
-            "-d file   Convert file to DOT digraph.\n\n"
-
-            "Examples:\n"
-            "mpirun %s -b sboxes/des_s1.txt\n"
-            "Generates a gate graph for all output bits of the DES S1 S-box.\n\n"
-
-            "mpirun %s -l -b sboxes/des_s1.txt\n"
-            "Generates a LUT graph for all output bits of the DES S1 S-box.\n\n"
-
-            "mpirun %s -o 0 -b sboxes/rijndael.txt\n"
-            "Generates a gate graph for output bit 0 of the Rijndael S-box.\n\n"
-
-            "mpirun %s -d 2-017-0000-01-b55885b4.xml | dot -Tpng > 2-017-0000-01-b55885b4.png\n"
-            "Converts a generated graph to Graphviz DOT format and generates a graphical\n"
-            "representation.\n\n", name, name, name, name);
-}
-
-/* Used in parse_options to increase readability. */
+/* Used in parse_opt to increase readability. */
+#define PARSE_OPTIONS_EXIT()\
+  stop_workers();\
+  MPI_Finalize();\
+  exit(1);
 #define PARSE_OPTIONS_TEST_NAME_LENGTH(X)\
   if (strlen(X) >= MAX_NAME_LEN) {\
     fprintf(stderr, "Error: File name too long. (sboxgates.c:%d)\n", __LINE__);\
-    return false;\
+    stop_workers();\
+    MPI_Finalize();\
+    exit(1);\
   }
 
-/* Parses command line options and places the result in an options structure. In case of error,
-   the function will return false and set retval to a suggested return value for main. */
-bool parse_options(int argc, char **argv, options *opt, int *retval) {
-  assert(argc > 0);
-  assert(argv != NULL);
-  assert(opt != NULL);
-  assert(retval != NULL);
-  char *name = argv[0];
-
-  if (argc == 1) {
-    print_command_help(name);
-    *retval = 1;
-    return false;
-  }
-
-  memset(opt, 0, sizeof(options));
-  opt->iterations = 1;
-  opt->oneoutput = -1;
-  opt->metric = GATES;
-  opt->randomize = true;
-  create_avail_gates(2 + 64 + 128, opt); /* AND + OR + XOR */
-
-  char opts[] = "a:b:c:d:g:hi:lno:p:sv";
-
-  int c, avail_gates;
+static error_t parse_opt(int key, char *arg, struct argp_state *state) {
+  options *opt = state->input;
+  int avail_gates;
   char *endptr;
-  while ((c = getopt(argc, argv, opts)) != -1) {
-    switch (c) {
-      /* Set available gates. */
-      case 'a':
-        avail_gates = atoi(optarg);
-        if (avail_gates <= 0 || avail_gates > 65535) {
-          fprintf(stderr, "Bad available gates value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
-          *retval = 1;
-          return false;
-        }
-        create_avail_gates(avail_gates, opt);
-        break;
-      /* Set target S-box definition. */
-      case 'b':
-        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
-        strcpy(opt->sboxfname, optarg);
-        break;
-      /* Convert generated graph to C function. */
-      case 'c':
-        opt->output_c = true;
-        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
-        strcpy(opt->fname, optarg);
-        break;
-      /* Convert generated graph to DOT digraph. */
-      case 'd':
-        opt->output_dot = true;
-        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
-        strcpy(opt->fname, optarg);
-        break;
-      /* Load graph from file. */
-      case 'g':
-        PARSE_OPTIONS_TEST_NAME_LENGTH(optarg);
-        strcpy(opt->gfname, optarg);
-        break;
-      /* Print help. */
-      case 'h':
-        print_command_help(name);
-        *retval = 0;
-        return false;
-      /* Do multiple iterations per step. */
-      case 'i':
-        opt->iterations = strtoul(optarg, &endptr, 10);
-        if (*endptr != '\0' || opt->iterations < 1) {
-          fprintf(stderr, "Bad iterations value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
-        }
-        break;
-      /* Generate 3LUT graph. */
-      case 'l':
-        opt->lut_graph = true;
-        break;
-      case 'n':
-        opt->try_nots = true;
-        break;
-      /* Generate single-output graph. */
-      case 'o':
-        opt->oneoutput = strtoul(optarg, &endptr, 10);
-        if (*endptr != '\0' || opt->oneoutput < 0 || opt->oneoutput > 7) {
-          fprintf(stderr, "Bad output value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
-          *retval = 1;
-          return false;
-        }
-        break;
-      /* Permute S-box by XORing input with value. */
-      case 'p':
-        opt->permute = strtoul(optarg, &endptr, 10);
-        if (*endptr != '\0' || opt->permute < 0 || opt->permute > 255) {
-          fprintf(stderr, "Bad permutation value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
-          *retval = 1;
-          return false;
-        }
-        break;
-      /* Use SAT metric. */
-      case 's':
-        opt->metric = SAT;
-        break;
-      case 'v':
-        opt->verbosity += 1;
-        break;
-      /* Undefined flag. */
-      default:
-        fprintf(stderr, "Bad argument. (sboxgates.c:%d)\n", __LINE__);
-        *retval = 1;
-        return false;
-    }
-  }
+  switch (key) {
+    case 'a':
+      avail_gates = atoi(arg);
+      if (avail_gates <= 0 || avail_gates > 65535) {
+        fprintf(stderr, "Bad available gates value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        PARSE_OPTIONS_EXIT();
+      }
+      create_avail_gates(avail_gates, opt);
+      return 0;
+    case 'c':
+      opt->output_c = true;
+      return 0;
+    case 'd':
+      opt->output_dot = true;
+      return 0;
+    case 'g':
+      PARSE_OPTIONS_TEST_NAME_LENGTH(arg);
+      strcpy(opt->gfname, arg);
+      return 0;
+    case 'i':
+      opt->iterations = strtoul(arg, &endptr, 10);
+      if (*endptr != '\0' || opt->iterations < 1) {
+        fprintf(stderr, "Bad iterations value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        PARSE_OPTIONS_EXIT();
+      }
+      return 0;
+    case 'l':
+      opt->lut_graph = true;
+      return 0;
+    case 'n':
+      opt->try_nots = true;
+      return 0;
+    case 'o':
+      opt->oneoutput = strtoul(arg, &endptr, 10);
+      if (*endptr != '\0' || opt->oneoutput < 0 || opt->oneoutput > 7) {
+        fprintf(stderr, "Bad output value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        PARSE_OPTIONS_EXIT();
+      }
+      return 0;
+    case 'p':
+      opt->permute = strtoul(arg, &endptr, 10);
+      if (*endptr != '\0' || opt->permute < 0 || opt->permute > 255) {
+        fprintf(stderr, "Bad permutation value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        PARSE_OPTIONS_EXIT();
+      }
+      return 0;
+    case 's':
+      opt->metric = SAT;
+      return 0;
+    case 'v':
+      opt->verbosity += 1;
+      return 0;
+    case ARGP_KEY_ARG:
+      if (strlen(opt->fname) != 0) {
+        return 0;
+      }
+      PARSE_OPTIONS_TEST_NAME_LENGTH(arg);
+      strcpy(opt->fname, arg);
+      return 0;
+    case ARGP_KEY_END:
+      if (opt->output_c && opt->output_dot) {
+        fprintf(stderr, "Cannot combine c and d options. (sboxgates.c:%d)\n", __LINE__);
+        PARSE_OPTIONS_EXIT();
+      }
 
-  if (opt->output_c && opt->output_dot) {
-    fprintf(stderr, "Cannot combine c and d options. (sboxgates.c:%d)\n", __LINE__);
-    *retval = 1;
-    return false;
-  }
+      if (opt->lut_graph && opt->metric == SAT) {
+        fprintf(stderr, "SAT metric can not be combined with LUT graph generation. "
+            "(sboxgates.c:%d)\n", __LINE__);
+        PARSE_OPTIONS_EXIT();
+      }
 
-  if (opt->lut_graph && opt->metric == SAT) {
-    fprintf(stderr, "SAT metric can not be combined with LUT graph generation. (sboxgates.c:%d)\n",
-        __LINE__);
-    *retval = 1;
-    return false;
+      if (strlen(opt->fname) == 0) {
+        fprintf(stderr, "Input file name argument missing. (sboxgates.c:%d)\n", __LINE__);
+        PARSE_OPTIONS_EXIT();
+      }
+      /* Create derived boolean functions. */
+      int num = 0;
+      if (opt->try_nots) {
+        num = get_not_functions(opt->avail_gates, opt->avail_not);
+      }
+      memset(opt->avail_not + num, 0, sizeof(boolfunc));
+      num = get_3_input_function_list(opt->avail_gates, opt->avail_3, opt->try_nots);
+      memset(opt->avail_3 + num, 0, sizeof(boolfunc));
+      return 0;
+    default:
+      return ARGP_ERR_UNKNOWN;
   }
-
-  if (!opt->output_c && !opt->output_dot && strlen(opt->sboxfname) == 0) {
-    fprintf(stderr, "No target S-box file name argument. (sboxgates.c:%d)\n", __LINE__);
-    *retval = 1;
-    return false;
-  }
-
-  /* Create derived boolean functions. */
-  int num = 0;
-  if (opt->try_nots) {
-    num = get_not_functions(opt->avail_gates, opt->avail_not);
-  }
-  memset(opt->avail_not + num, 0, sizeof(boolfunc));
-  num = get_3_input_function_list(opt->avail_gates, opt->avail_3, opt->try_nots);
-  memset(opt->avail_3 + num, 0, sizeof(boolfunc));
-
-  if (opt->verbosity >= 1) {
-    printf("Available gates: NOT ");
-    for (int i = 0; opt->avail_gates[i].num_inputs != 0; i++) {
-      printf("%s ", gate_name[opt->avail_gates[i].fun]);
-    }
-    printf("\nGenerated gates: ");
-    for (int i = 0; opt->avail_not[i].num_inputs != 0; i++) {
-      printf("%s ", gate_name[opt->avail_not[i].fun]);
-    }
-    printf("\nGenerated 3-input gates: ");
-    for (int i = 0; opt->avail_3[i].num_inputs != 0; i++) {
-      printf("%02x ", opt->avail_3[i].fun);
-    }
-    printf("\n");
-  }
-
-  return true;
 }
 
 /* Loads an S-box from a file. The file should contain the S-box table as 2^n (1 <= n <= 8)
@@ -1085,10 +1010,10 @@ bool load_sbox(uint8_t *sbox, uint32_t *num_inputs, const options *opt) {
   assert(sbox != NULL);
   assert(num_inputs != NULL);
   assert(opt != NULL);
-  assert(opt->sboxfname != NULL);
+  assert(opt->fname != NULL);
   int sbox_inp = 0;
 
-  FILE *fp = fopen(opt->sboxfname, "r");
+  FILE *fp = fopen(opt->fname, "r");
   if (fp == NULL) {
     fprintf(stderr, "Error when opening target S-box file. (sboxgates.c:%d)\n", __LINE__);
     return false;
@@ -1131,6 +1056,8 @@ bool load_sbox(uint8_t *sbox, uint32_t *num_inputs, const options *opt) {
   return true;
 }
 
+static struct argp argp = {argp_options, parse_opt, args_doc, doc, 0, 0, 0};
+
 int main(int argc, char **argv) {
   MPI_Init(&argc, &argv);
   int rank, size;
@@ -1147,12 +1074,40 @@ int main(int argc, char **argv) {
   }
 
   /* Parse command line options. */
-  options opt;
-  int retval;
-  if (!parse_options(argc, argv, &opt, &retval)) {
-    stop_workers();
-    MPI_Finalize();
-    return retval;
+  options opt = {
+    .fname = {0},
+    .gfname = {0},
+    .iterations = 1,
+    .oneoutput = -1,
+    .permute = 0,
+    .metric = GATES,
+    .output_c = false,
+    .output_dot = false,
+    .lut_graph = false,
+    .randomize = false,
+    .try_nots = false,
+    .avail_gates = {{0}},
+    .avail_not = {{0}},
+    .avail_3 = {{0}},
+    .num_avail_3 = 0,
+    .verbosity = 0
+  };
+  create_avail_gates(2 + 64 + 128, &opt); /* AND + OR + XOR */
+  argp_parse(&argp, argc, argv, 0, 0, &opt);
+  if (opt.verbosity >= 1) {
+    printf("Available gates: NOT ");
+    for (int i = 0; opt.avail_gates[i].num_inputs != 0; i++) {
+      printf("%s ", gate_name[opt.avail_gates[i].fun]);
+    }
+    printf("\nGenerated gates: ");
+    for (int i = 0; opt.avail_not[i].num_inputs != 0; i++) {
+      printf("%s ", gate_name[opt.avail_not[i].fun]);
+    }
+    printf("\nGenerated 3-input gates: ");
+    for (int i = 0; opt.avail_3[i].num_inputs != 0; i++) {
+      printf("%02x ", opt.avail_3[i].fun);
+    }
+    printf("\n");
   }
 
   /* Convert graph to C or DOT output and quit. */
