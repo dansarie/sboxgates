@@ -42,7 +42,7 @@ const char *argp_program_version = "sboxgates 1.0";
 const char *argp_program_bug_address = "https://github.com/dansarie/sboxgates/issues";
 const char doc[] = "Generates graphs of Boolean gates or 3-input LUTs that realize a specified "
     "S-box. Generated graphs can be converted to C/CUDA source code or to Graphviz DOT format.\v"
-    "This program uses MPI for parallellization and should therefore be run using the mpirun "
+    "This program uses MPI for parallelization and should therefore be run using the mpirun "
     "utility. Generated graphs are output as XML files. In its basic mode, the program generates a "
     "single graph for all outputs of the S-box. It is also possible to generate separate graphs "
     "for each output, which can significantly decrease the time to generate the graph. ";
