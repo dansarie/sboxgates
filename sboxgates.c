@@ -917,7 +917,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     case 'a':
       avail_gates = atoi(arg);
       if (avail_gates <= 0 || avail_gates > 65535) {
-        fprintf(stderr, "Bad available gates value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        fprintf(stderr, "Bad available gates value: %s (sboxgates.c:%d)\n", arg, __LINE__);
         PARSE_OPTIONS_EXIT();
       }
       create_avail_gates(avail_gates, opt);
@@ -935,7 +935,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     case 'i':
       opt->iterations = strtoul(arg, &endptr, 10);
       if (*endptr != '\0' || opt->iterations < 1) {
-        fprintf(stderr, "Bad iterations value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        fprintf(stderr, "Bad iterations value: %s (sboxgates.c:%d)\n", arg, __LINE__);
         PARSE_OPTIONS_EXIT();
       }
       return 0;
@@ -948,14 +948,14 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     case 'o':
       opt->oneoutput = strtoul(arg, &endptr, 10);
       if (*endptr != '\0' || opt->oneoutput < 0 || opt->oneoutput > 7) {
-        fprintf(stderr, "Bad output value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        fprintf(stderr, "Bad output value: %s (sboxgates.c:%d)\n", arg, __LINE__);
         PARSE_OPTIONS_EXIT();
       }
       return 0;
     case 'p':
       opt->permute = strtoul(arg, &endptr, 10);
       if (*endptr != '\0' || opt->permute < 0 || opt->permute > 255) {
-        fprintf(stderr, "Bad permutation value: %s (sboxgates.c:%d)\n", optarg, __LINE__);
+        fprintf(stderr, "Bad permutation value: %s (sboxgates.c:%d)\n", arg, __LINE__);
         PARSE_OPTIONS_EXIT();
       }
       return 0;
@@ -1116,7 +1116,8 @@ int main(int argc, char **argv) {
     state st;
     if (!load_state(opt.fname, &st)) {
       fprintf(stderr, "Error when reading state file. (sboxgates.c:%d)\n", __LINE__);
-      return false;
+      MPI_Finalize();
+      return 1;
     }
     int retval = 0;
     if (opt.output_c) {
