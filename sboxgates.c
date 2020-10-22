@@ -1084,7 +1084,7 @@ int main(int argc, char **argv) {
     .output_c = false,
     .output_dot = false,
     .lut_graph = false,
-    .randomize = false,
+    .randomize = true,
     .try_nots = false,
     .avail_gates = {{0}},
     .avail_not = {{0}},
