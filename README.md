@@ -113,8 +113,8 @@ available for the search. The argument value is a bitfield, where each bit repre
 type. To specify the gates to be used, add up their values from the table below and pass the sum as
 the value of the `--available-gates` argument. If no such argument is specified, the default is
 194, i.e. AND, OR, and XOR. The `--append-not` flag can also be used to increase the number of
-gates used for the search, by artificially creating NOT-versions of the available gates. This can
-both increase and decrease the size of generated graphs.
+gates used for the search, by generating versions of the available gates with inverted outputs.
+This can both increase and decrease the size of generated graphs.
 
 When the `--verbose` flag is used, the program starts by printing out the 2- and 3-input gates that
 have been generated and will be used for the search. Generation with LUTs will always include all
@@ -143,7 +143,7 @@ have been generated and will be used for the search. Generation with LUTs will a
 
 The default metric used in the search is the number of gates in the generated graph. An alternative
 metric can be selected with the `--sat-metric` argument. Instead of minimizing the number of gates,
-it attempts to minimizing the size of the
+it attempts to minimize the size of the
 [CNF](https://en.wikipedia.org/wiki/Conjunctive_normal_form) representation of the generated graph.
 It is meant to improve the performance when the graph is used with
 [SAT](https://en.wikipedia.org/wiki/Boolean_satisfiability_problem) solvers.
