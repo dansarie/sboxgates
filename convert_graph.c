@@ -59,6 +59,11 @@ void print_digraph(const state *st) {
       sprintf(gatename, "0x%02x", st->gates[gt].function);
     } else {
       strcpy(gatename, gate_name[st->gates[gt].type]);
+      for (int i = 0; gatename[i] != '\0'; i++) {
+        if (gatename[i] == '_') {
+          gatename[i] = ' ';
+        }
+      }
     }
     printf("  gt%d [label=\"%s\"];\n", gt, gatename);
   }
