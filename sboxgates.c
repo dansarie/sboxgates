@@ -374,6 +374,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       return NO_GATE;
     }
 
+    /* All combinations of two gates. */
     for (int i = 0; i < st->num_gates; i++) {
       const gatenum gi = gate_order[i];
       ttable ti = st->gates[gi].table;
@@ -397,6 +398,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       return NO_GATE;
     }
 
+    /* All combinations of three gates. */
     for (int i = 0; i < st->num_gates; i++) {
       const gatenum gi = gate_order[i];
       ttable ti = st->gates[gi].table;
@@ -433,7 +435,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         }
       }
     }
-  }
+  } /* End of if (opt->lut_graph)... */
 
   /* 5. Use the specified input bit to select between two Karnaugh maps. Call this function
      recursively to generate those two maps. */
@@ -456,6 +458,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
   /* Try all input bit orders. */
   for (int bit = 0; bit < get_num_inputs(st); bit++) {
+    /* Skip input bits that have already been used for multiplexing. */
     bool skip = false;
     for (int i = 0; i < bitp; i++) {
       if (inbits[i] == bit) {
@@ -471,7 +474,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
     const ttable fsel = st->gates[bit].table; /* Selection bit. */
     state nst;
     gatenum nst_out;
-    if (opt->lut_graph) {
+    if (opt->lut_graph) { /* Use a LUT-based multiplexer. */
       nst = *st;
       nst.max_gates -= 1; /* A multiplexer will have to be added later. */
       gatenum fb = create_circuit(&nst, target, mask & ~fsel, next_inbits, opt);
@@ -511,7 +514,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
       }
       assert(ttable_equals_mask(target, nst.gates[nst_out].table, mask));
-    } else {
+    } else { /* Not a LUT graph. Test both AND- and OR-based multiplexers. */
       state nst_and = *st; /* New state using AND multiplexer. */
 
       /* A multiplexer will have to be added later. */
@@ -587,8 +590,9 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           nst_out = mux_out_or;
         }
       }
-    }
+    } /* End of if (opt->lut_graph)... New state in nst. */
 
+    /* Compare nst to best. */
     assert(best.num_gates == 0 || ttable_equals_mask(target, best.gates[best_out].table, mask));
     if (opt->metric == GATES) {
       if (best.num_gates == 0 || nst.num_gates < best.num_gates) {
@@ -602,7 +606,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       }
     }
     assert(best.num_gates == 0 || ttable_equals_mask(target, best.gates[best_out].table, mask));
-  }
+  } /* End of for loop over all input bits. */
 
   if (best.num_gates == 0) {
     return NO_GATE;
