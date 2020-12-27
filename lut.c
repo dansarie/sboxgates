@@ -145,7 +145,7 @@ bool get_lut_function(ttable in1, ttable in2, ttable in3, ttable target, ttable 
    contains the outer LUT function, ret[1] the inner LUT function, and ret[2] - ret[6] the five
    input gate numbers. */
 bool search_5lut(const state st, const ttable target, const ttable mask, const int8_t *inbits,
-    uint16_t *ret) {
+    uint16_t *ret, int verbosity) {
   assert(ret != NULL);
   assert(st.num_gates >= 5);
 
@@ -247,8 +247,10 @@ bool search_5lut(const state st, const ttable target, const ttable mask, const i
             MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
           }
           quit = true;
-          printf("[% 4d] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n", rank, ret[0],
-              ret[1], ret[2], ret[3], ret[4], ret[5], ret[6]);
+          if (verbosity >= 1) {
+            printf("[% 4d] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n", rank, ret[0],
+                ret[1], ret[2], ret[3], ret[4], ret[5], ret[6]);
+          }
         }
         next_combination(order, 3, 5); /* Next combination of three gates. */
         /* Work out the other two gates. */
@@ -283,7 +285,7 @@ bool search_5lut(const state st, const ttable target, const ttable mask, const i
    contains the outer LUT function, ret[1] the middle LUT function, ret[2] the inner LUT function,
    and ret[3] - ret[9] the seven input gate numbers. */
 bool search_7lut(const state st, const ttable target, const ttable mask, const int8_t *inbits,
-    uint16_t *ret) {
+    uint16_t *ret, int verbosity) {
   assert(ret != NULL);
   assert(st.num_gates >= 7);
 
@@ -496,8 +498,10 @@ bool search_7lut(const state st, const ttable target, const ttable mask, const i
             MPI_Isend(&rank, 1, MPI_INT, 0, 1, MPI_COMM_WORLD, &send_req);
           }
           quit = true;
-          printf("[% 4d] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n", rank,
-              func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
+          if (verbosity >= 1) {
+            printf("[% 4d] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n", rank,
+                func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
+          }
         }
       }
       if (!quit) {
@@ -562,6 +566,7 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
   work.target = target;
   work.mask = mask;
   work.quit = false;
+  work.verbosity = opt->verbosity;
   memcpy(work.inbits, inbits, sizeof(uint8_t) * 8);
   MPI_Bcast(&work, 1, g_mpi_work_type, 0, MPI_COMM_WORLD);
 
@@ -572,9 +577,12 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
   uint16_t res[10];
 
   memset(res, 0, sizeof(uint16_t) * 10);
-  printf("[   0] Search 5.\n");
+  if (opt->verbosity >= 2) {
+    printf("[   0] Search 5.\n");
+  }
 
-  if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, work.inbits, res)) {
+  if (work.st.num_gates >= 5
+      && search_5lut(work.st, work.target, work.mask, work.inbits, res, opt->verbosity)) {
     uint8_t func_outer = (uint8_t)res[0];
     uint8_t func_inner = (uint8_t)res[1];
     gatenum a = res[2];
@@ -587,8 +595,10 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
     ttable tc = st->gates[c].table;
     ttable td = st->gates[d].table;
     ttable te = st->gates[e].table;
-    printf("[   0] Found 5LUT: %02x %02x    %3d %3d %3d %3d %3d\n",
-        func_outer, func_inner, a, b, c, d, e);
+    if (opt->verbosity >= 1) {
+      printf("[   0]   Selected: %02x %02x    %3d %3d %3d %3d %3d\n",
+          func_outer, func_inner, a, b, c, d, e);
+    }
 
     const ttable tables[] = {ta, tb, tc, td, te};
     assert(check_n_lut_possible(5, target, mask, tables));
@@ -608,8 +618,11 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
   bool search7 = true;
   MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
 
-  printf("[   0] Search 7.\n");
-  if (work.st.num_gates >= 7 && search_7lut(work.st, work.target, work.mask, work.inbits, res)) {
+  if (opt->verbosity >= 2) {
+    printf("[   0] Search 7.\n");
+  }
+  if (work.st.num_gates >= 7
+      && search_7lut(work.st, work.target, work.mask, work.inbits, res, opt->verbosity)) {
     uint8_t func_outer = (uint8_t)res[0];
     uint8_t func_middle = (uint8_t)res[1];
     uint8_t func_inner = (uint8_t)res[2];
@@ -627,8 +640,10 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
     ttable te = st->gates[e].table;
     ttable tf = st->gates[f].table;
     ttable tg = st->gates[g].table;
-    printf("[   0] Found 7LUT: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n",
-        func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
+    if (opt->verbosity >= 1) {
+      printf("[   0]   Selected: %02x %02x %02x %3d %3d %3d %3d %3d %3d %3d\n",
+          func_outer, func_middle, func_inner, a, b, c, d, e, f, g);
+    }
     const ttable tables[] = {ta, tb, tc, td, te, tf, tg};
     assert(check_n_lut_possible(7, target, mask, tables));
     ttable t_outer = generate_lut_ttable(func_outer, ta, tb, tc);
@@ -640,7 +655,9 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
         add_lut(st, func_middle, t_middle, d, e, f), g);
   }
 
-  printf("[   0] No LUTs found. Num gates: %d\n", st->num_gates - get_num_inputs(st));
+  if (opt->verbosity >= 2) {
+    printf("[   0] No LUTs found. Num gates: %d\n", st->num_gates - get_num_inputs(st));
+  }
   return NO_GATE;
 }
 

@@ -37,6 +37,7 @@
 
 uint8_t g_sbox_enc[256];      /* Target S-box. */
 ttable g_target[8];           /* Truth tables for the output bits of the sbox. */
+MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. Defined in sboxgates.h. */
 
 const char *argp_program_version = "sboxgates 1.0";
 const char *argp_program_bug_address = "https://github.com/dansarie/sboxgates/issues";
@@ -631,13 +632,14 @@ static void mpi_worker() {
       return;
     }
 
-    if (work.st.num_gates >= 5 && search_5lut(work.st, work.target, work.mask, work.inbits, res)) {
+    if (work.st.num_gates >= 5
+        && search_5lut(work.st, work.target, work.mask, work.inbits, res, work.verbosity)) {
       continue;
     }
     bool search7;
     MPI_Bcast(&search7, 1, MPI_C_BOOL, 0, MPI_COMM_WORLD);
     if (search7 && work.st.num_gates >= 7) {
-      search_7lut(work.st, work.target, work.mask, work.inbits, res);
+      search_7lut(work.st, work.target, work.mask, work.inbits, res, work.verbosity);
     }
   }
 }
@@ -868,22 +870,24 @@ void create_g_mpi_work_type() {
   assert(MPI_Type_commit(&state_type) == MPI_SUCCESS);
 
   /* mpi_work struct*/
-  int work_block_lengths[] = {1, 4, 4, 8, 1};
+  int work_block_lengths[] = {1, 4, 4, 8, 1, 1};
   MPI_Aint work_displacements[] = {
       offsetof(mpi_work, st),
       offsetof(mpi_work, target),
       offsetof(mpi_work, mask),
       offsetof(mpi_work, inbits),
-      offsetof(mpi_work, quit)
+      offsetof(mpi_work, quit),
+      offsetof(mpi_work, verbosity)
     };
   MPI_Datatype work_datatypes[] = {
       state_type,
       MPI_UINT64_T,
       MPI_UINT64_T,
       MPI_UINT8_T,
-      MPI_C_BOOL
+      MPI_C_BOOL,
+      MPI_INT
     };
-  assert(MPI_Type_create_struct(5, work_block_lengths, work_displacements, work_datatypes,
+  assert(MPI_Type_create_struct(6, work_block_lengths, work_displacements, work_datatypes,
       &g_mpi_work_type) == MPI_SUCCESS);
   assert(MPI_Type_commit(&g_mpi_work_type) == MPI_SUCCESS);
 }

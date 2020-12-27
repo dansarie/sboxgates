@@ -51,9 +51,10 @@ typedef struct {
   ttable mask;
   int8_t inbits[8];
   bool quit;        /* Set to true to signal workers to quit. */
+  int verbosity;
 } mpi_work;
 
-MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. */
+extern MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. */
 
 /* Adds a three input LUT with function func to the state st. Returns the gate number of the
    added LUT. */
