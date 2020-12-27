@@ -203,8 +203,8 @@ bool search_5lut(const state st, const ttable target, const ttable mask, const i
 
   bool quit = false;
   for (uint64_t i = start_n; !quit && i < stop_n; i++) {
-    /* Reject input gate combinations that contain a bit that the algorithm has already been used
-       as a multiplexer input in step 5 of the algorithm. */
+    /* Reject input gate combinations that contain a bit that the algorithm has already used as a
+       multiplexer input in step 5 of the algorithm. */
     bool rejected = false;
     for (int k = 0; !rejected && inbits[k] != -1; k++) {
       for (int m = 0; m < 5; m++) {
@@ -321,8 +321,8 @@ bool search_7lut(const state st, const ttable target, const ttable mask, const i
   assert(result != NULL);
   int p = 0;
   for (uint64_t i = start; i < stop; i++) {
-    /* Reject input gate combinations that contain a bit that the algorithm has already been used
-       as a multiplexer input in step 5 of the algorithm. */
+    /* Reject input gate combinations that contain a bit that the algorithm has already used as a
+       multiplexer input in step 5 of the algorithm. */
     bool rejected = false;
     for (int k = 0; !rejected && inbits[k] != -1; k++) {
       for (int m = 0; m < 7; m++) {
