@@ -1,0 +1,23 @@
+{
+  "@context": "https://raw.githubusercontent.com/codemeta/codemeta/master/codemeta.jsonld",
+  "@type": "Code",
+  "author": [
+    {
+      "@type": "Person",
+      "givenName": "Marcus",
+      "familyName": "Dansarie",
+      "email": "marcus@dansarie.se",
+      "@id": "https://orcid.org/0000-0001-9246-0263"
+    }
+  ],
+  "identifier": "",
+  "codeRepository": "https://github.com/dansarie/sboxgates",
+  "datePublished": "2020-12-28",
+  "dateModified": "2020-12-28",
+  "dateCreated": "2020-12-28",
+  "description": "A program for finding low gate count implementations of S-boxes.",
+  "keywords": "S-box, cryptography",
+  "license": "GPL v3.0",
+  "title": "sboxgates",
+  "version": ""
+}
