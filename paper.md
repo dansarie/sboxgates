@@ -18,7 +18,7 @@ bibliography: paper.bib
 
 # Summary
 
-S-boxes are often the only nonlinear components in modern block ciphers. They are commonly selected to comply with very specific criteria in order to make a cipher secure against, for example, linear and differential attacks. An $N \times M$ S-box can be thought of as a lookup table that relates an $M$-bit input value to an $N$-bit output value, or as a set of $N$ boolean functions of $M$ variables [@schneier1996]. <!-- p. 349 -->
+S-boxes are often the only nonlinear components in modern block ciphers. They are commonly selected to comply with very specific criteria in order to make a cipher secure against, for example, linear and differential attacks. An $M \times N$ S-box can be thought of as a lookup table that relates an $M$-bit input value to an $N$-bit output value, or as a set of $N$ boolean functions of $M$ variables [@schneier1996]. <!-- p. 349 -->
 
 Although cipher specifications generally describe S-boxes using their lookup tables, they can also be described as boolean functions or logic gate circuits. `sboxgates`, which is presented here, finds equivalent logic gate circuits for S-boxes, given their lookup table specification. Generated circuits are output in a human-readable XML format. The software can convert the output files into C or CUDA (a programming language for Nvidia GPUs) source code. The generated circuits can also be converted to the DOT graph description language for visualization with Graphviz [@graphviz].
 
@@ -36,7 +36,7 @@ A bitslice software implementation was first described by Biham [-@biham1994]. I
 
 In addition to bitslice implementations in software, which attempt to mimic hardware implementations, designs of actual hardware such as application specific integrated circuits (ASICs) or field programmable gate arrays (FPGAs) can also be made more efficient by small equivalent logic gate circuits for S-boxes.
 
-In algebraic cryptanalysis, one attack method is to model a cipher along with its inputs and outputs as a SAT problem. This can be used to find, for example, weak keys in block ciphers or preimates in hash functions [@lafitte2014]. SAT problems are typically expressed in conjunctive normal form (CNF) and logic circuits can quickly be converted into CNF using the Tseytin transform [@knuth2015tacp4f6]. Thus, an efficient logic gate representation of an S-box can be transformed into an efficient CNF representation. CNF representations can in turn be transformed into a system of equations in GF(2) [@lafitte2014].
+In algebraic cryptanalysis, one attack method is to model a cipher along with its inputs and outputs as a SAT problem. This can be used to find, for example, weak keys in block ciphers or preimages in hash functions [@lafitte2014]. SAT problems are typically expressed in conjunctive normal form (CNF) and logic circuits can quickly be converted into CNF using the Tseytin transform [@knuth2015tacp4f6]. Thus, an efficient logic gate representation of an S-box can be transformed into an efficient CNF representation. CNF representations can in turn be transformed into a system of equations in GF(2) [@lafitte2014].
 
 The only known software with similar functionality to `sboxgates` is `SBOXDiscovery` which is restricted to generating logic circuit representations of the DES S-boxes [@sboxdiscovery]. The software has been abandoned by its original author. Many of the optimizations of Kwan's algorithm made in `SBOXDiscovery` have been included in `sboxgates`.
 
