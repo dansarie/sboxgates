@@ -5,7 +5,7 @@
    IACR Cryptology ePrint Archive 2000 (2000): 51. Improvements from
    SBOXDiscovery (https://github.com/DeepLearningJohnDoe/SBOXDiscovery) have been added.
 
-   Copyright (c) 2016-2017, 2019-2020 Marcus Dansarie
+   Copyright (c) 2016-2017, 2019-2021 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -126,8 +126,6 @@ static gatenum add_gate(state * restrict st, gate_type type, gatenum gid1, gaten
   return st->num_gates - 1;
 }
 
-/* Adds a three input LUT with function func to the state st. Returns the gate number of the
-   added LUT. */
 gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid1, gatenum gid2, gatenum gid3) {
   if (gid1 == NO_GATE || gid2 == NO_GATE || gid3 == NO_GATE || st->num_gates > st->max_gates) {
     return NO_GATE;
@@ -228,7 +226,6 @@ static gatenum add_boolfunc_3(state * restrict st, const boolfunc * restrict fun
   return add_gate(st, fun->fun2, out1, gid3, opt);
 }
 
-/* Returns the number of input gates in the state. */
 int get_num_inputs(const state *st) {
   int inputs = 0;
   for (int i = 0; st->gates[i].type == IN && i < st->num_gates; i++) {
@@ -252,7 +249,6 @@ static int get_num_outputs() {
   assert(0);
 }
 
-/* Generates pseudorandom 64 bit strings. Used for randomizing the search process. */
 uint64_t xorshift1024() {
   static bool init = false;
   static uint64_t rand[16];
@@ -277,11 +273,7 @@ uint64_t xorshift1024() {
   return rand[p] * 1181783497276652981U;
 }
 
-/* Used in create_circuit to check if any solutions with smaller metric are possible. Uses either
-   the add or the add_sat parameter depending on the current metric in use. Returns true if a
-   solution with the provided metric is possible with respect to the value of st->max_gates or
-   st->max_sat_metric. */
-bool check_num_gates_possible(state *st, int add, int add_sat, const options *opt) {
+bool check_num_gates_possible(const state *st, int add, int add_sat, const options *opt) {
   if (opt->metric == SAT && st->sat_metric + add_sat > st->max_sat_metric) {
     return false;
   }
@@ -644,8 +636,6 @@ static void mpi_worker() {
   }
 }
 
-/* If sbox is true, a target truth table for the given bit of the sbox is generated.
-   If sbox is false, the truth table of the given input bit is generated. */
 ttable generate_target(uint8_t bit, bool sbox) {
   assert(bit < 8);
   uint64_t vec[] = {0, 0, 0, 0};

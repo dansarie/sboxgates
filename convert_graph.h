@@ -2,7 +2,7 @@
 
    Header file for graph conversion functions.
 
-   Copyright (c) 2019-2020 Marcus Dansarie
+   Copyright (c) 2019-2021 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -22,13 +22,18 @@
 
 #include "state.h"
 
-/* Prints a truth table to the console. Used for debugging. */
+/* Prints a truth table to the console. Used for debugging.
+   tbl - the truth table to print. */
 void print_ttable(ttable tbl);
 
-/* Prints a gate network to stdout in Graphviz dot format. */
+/* Prints a gate network to stdout in Graphviz dot format.
+   st - pointer to the state to be printed. */
 void print_digraph(const state *st);
 
-/* Converts a gate network to a C function and prints it to stdout. */
+/* Converts a gate network to a C or CUDA function and prints it to stdout. If the state contains
+   at least one LUT gate it will be converted to a CUDA function. Otherwise, it will be converted to
+   a C function.
+   st - pointer to the state to be converted to a function. */
 bool print_c_function(const state *st);
 
 #endif /* __CONVERT_GRAPH_H__ */
