@@ -1,6 +1,6 @@
 /* sboxgates.h
 
-   Copyright (c) 2019-2020 Marcus Dansarie
+   Copyright (c) 2019-2021 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -46,39 +46,57 @@ typedef struct {
 
 /* Used to broadcast work to be done by other MPI ranks. */
 typedef struct {
-  state st;
-  ttable target;
-  ttable mask;
-  int8_t inbits[8];
+  state st;         /* The current search state. */
+  ttable target;    /* The search target truth table. */
+  ttable mask;      /* The current search mask. */
+  int8_t inbits[8]; /* List of input bits already used for multiplexing. Terminated by -1. */
   bool quit;        /* Set to true to signal workers to quit. */
-  int verbosity;
+  int verbosity;    /* Current verbosity level. */
 } mpi_work;
 
 extern MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. */
 
-/* Adds a three input LUT with function func to the state st. Returns the gate number of the
-   added LUT. */
+/* Adds a three input LUT gate to the state st. Returns the gate number of the added LUT, or
+   NO_GATE.
+   st    - pointer to the state struct where the LUT should be added.
+   func  - the function, i.e. lookup table, of the added LUT gate.
+   table - truth table of the added LUT.
+   gid1  - gate number of input 1.
+   gid2  - gate number of input 2.
+   gid3  - gate number of input 3. */
 gatenum add_lut(state *st, uint8_t func, ttable table, gatenum gid1, gatenum gid2, gatenum gid3);
 
 /* Used to check if any solutions with smaller metric are possible. Uses either the add or the
    add_sat parameter depending on the current metric in use. Returns true if a solution with the
-   provided metric is possible with respect to the value of st->max_gates or st->max_sat_metric. */
-bool check_num_gates_possible(state *st, int add, int add_sat, const options *opt);
+   provided metric is possible with respect to the value of st->max_gates or st->max_sat_metric.
+   st      - pointer to the search state to check.
+   add     - the number of added gates to check for.
+   add_sat - the added SAT metric to check for.
+   opt     - pointer to options struct. */
+bool check_num_gates_possible(const state *st, int add, int add_sat, const options *opt);
 
-/* Returns true if the truth table is all-zero. */
-bool ttable_zero(ttable tt);
+/* Returns true if the truth table is all-zero.
+   tt - a truth table. */
+bool ttable_zero(const ttable tt);
 
-/* Performs a masked test for equality. Only bits set to 1 in the mask will be tested. */
+/* Performs a masked test for equality. Only bits set to 1 in the mask will be tested.
+   in1  - a truth table.
+   in2  - a truth table.
+   mask - a mask. */
 bool ttable_equals_mask(const ttable in1, const ttable in2, const ttable mask);
 
-/* Returns the number of input gates in the state. */
+/* Returns the number of input gates in the state.
+   st - pointer to a state. */
 int get_num_inputs(const state *st);
 
-/* Generates pseudorandom 64 bit strings. Used for randomizing the search process. */
+/* Returns a pseudorandom 64 bit string. Uses the xorshift1024 algorithm, initialized by
+   /dev/urandom. Used in various places to randomize the search process. */
 uint64_t xorshift1024();
 
-/* If sbox is true, a target truth table for the given bit of the sbox is generated.
-   If sbox is false, the truth table of the given input bit is generated. */
+/* Generates a target truth table for the search.
+   bit  - which bit of the input/sbox to generate the target truth table for.
+   sbox - If true, a target truth table for the given bit of g_sbox_enc is generated.
+          If false, the truth table of the given input bit is generated. */
 ttable generate_target(uint8_t bit, bool sbox);
 
 #endif /* __SBOXGATES_H__ */

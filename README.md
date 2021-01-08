@@ -4,17 +4,20 @@
 [![Build Status](https://travis-ci.com/dansarie/sboxgates.svg?branch=master)](https://travis-ci.com/dansarie/sboxgates)
 [![Coverage Status](https://coveralls.io/repos/github/dansarie/sboxgates/badge.svg)](https://coveralls.io/github/dansarie/sboxgates)
 
-Program for finding low gate count implementations of S-boxes.
+Program for finding low gate count implementations of S-boxes. S-boxes are often the only nonlinear
+components in modern block ciphers. Thus, low gate count implementations can be useful for
+cryptanalysis and fast implementations in hardware or software.
 
 The algorithm used is described in [Kwan, Matthew: "Reducing the Gate Count of Bitslice DES."
-IACR Cryptology ePrint Archive 2000 (2000): 51](https://ia.cr/2000/051), with improvements from the
-GitHub project [SBOXDiscovery](https://github.com/tripcode/SBOXDiscovery) added. The program
-supports searching for gates using any subset of the 16 standard two-input boolean gates.
+IACR Cryptology ePrint Archive 2000 (2000): 51](https://ia.cr/2000/051). Improvements from the
+GitHub project [SBOXDiscovery](https://github.com/tripcode/SBOXDiscovery) have been added. The
+program supports searching for gates using any subset of the 16 standard two-input boolean gates.
 Additionally, the program also supports 3-bit LUTs. The latter can be used to find efficient
 implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 
 * [Dependencies](#dependencies)
 * [Build](#build)
+* [Test](#test)
 * [Run](#run)
   * [Command examples](#command-examples)
   * [Single output](#single-output)
@@ -22,19 +25,23 @@ implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or
   * [Selecting gates](#selecting-gates)
   * [Metrics](#metrics)
   * [Permuting S-boxes](#permuting-s-boxes)
-* [License](#license)
+* [Contributing](#contributing)
+* [License](#license-and-copyright)
 
 #### Graph representation of output bit 0 of DES S1 generated with sboxgates and Graphviz
 ![Graph representation of output bit 0 of DES S1](des_s1_bit0.svg)
 
 ## Dependencies
 
-* [CMake](https://github.com/Kitware/CMake) (for build)
+* [CMake](https://github.com/Kitware/CMake) version 3.9 or later (for build)
 * [libxml2](https://github.com/GNOME/libxml2)
-* MPI
+* An MPI implementation such as MPICH(https://github.com/pmodels/mpich) or
+  [Open MPI](https://github.com/open-mpi/ompi)
 * [Graphviz](https://github.com/ellson/graphviz) (for generating visual representations)
 
 ## Build
+
+The following commands will build sboxgates on Debian-based Linux distributions, such as Ubuntu.
 
 ```
 sudo apt-get install cmake graphviz libmpich-dev libxml2-dev mpich
@@ -44,11 +51,19 @@ cmake ..
 make
 ```
 
+## Test
+
+Tests are run automatically by [Travis CI](https://travis-ci.com/dansarie/sboxgates) on each new
+commit. The tests are documented in the testing script [.travis.yml](.travis.yml). Code coverage
+reports are available from [Coveralls](https://coveralls.io/github/dansarie/sboxgates).
+
 ## Run
 
 This program uses MPI for parallelization and should generally be run with the mpirun utility.
 Graph generation without LUTs (i.e. without the `--lut` argument) is not parallelized and the
-program can safely be run without MPI in those cases.
+program can safely be run without MPI in those cases. The number of processes to use for the
+parallelized operations can be selected using the `-n` flag to mpirun. `man mpirun` should provide
+documentation on the options available for controlling execution and parallelization
 
 The `--help` command line argument will display a brief list of command line options. The only
 required argument is the path of an S-box file. S-box files are text files that contain an S-box
@@ -77,6 +92,12 @@ Generate a logic circuit representation of the Rijndael S-box:
 Generate a LUT circuit for output bit 0 of the Rijndael S-box:
 ```
 mpirun ./sboxgates --lut --single-output 0 ../sboxes/rijndael.txt
+```
+
+Generate a LUT circuit for output bit 0 of the Rijndael S-box using 8 processes for the
+parallelized search:
+```
+mpirun -n 8 ./sboxgates --lut --single-output 0 ../sboxes/rijndael.txt
 ```
 
 Visualize a generated circuit with Graphviz:
@@ -153,7 +174,17 @@ It is meant to improve the performance when the graph is used with
 The `--permute` argument can be used to permute the S-box input by XORing it with a constant value,
 so that the S-box value for input value I becomes S(I ^ V), where V is the permutation value.
 
-## License
+## Contributing
 
-This project is licensed under the GNU General Public License -- see the [LICENSE](LICENSE)
+Reports on bugs and other issues are welcome. Please don't hesitate to open a new
+[issue](https://github.com/dansarie/sboxgates/issues).
+
+Likewise, contrubutions to code or documentation in the form of
+[pull requests](https://github.com/dansarie/sboxgates/pulls) are welcomed.
+
+## License and Copyright
+
+Copyright 2017-2021 [Marcus Dansarie](https://github.com/dansarie).
+
+This project is licensed under the GNU General Public License – see the [LICENSE](LICENSE)
 file for details.

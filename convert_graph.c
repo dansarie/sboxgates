@@ -3,7 +3,7 @@
    Helper functions for converting generated graphs to C/CUDA code or Graphviz dot format for
    visualization.
 
-   Copyright (c) 2016-2017, 2019-2020 Marcus Dansarie
+   Copyright (c) 2016-2017, 2019-2021 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -25,7 +25,6 @@
 #include "convert_graph.h"
 #include "sboxgates.h"
 
-/* Prints a truth table to the console. Used for debugging. */
 void print_ttable(ttable tbl) {
   uint64_t vec[4];
   memcpy((ttable*)vec, &tbl, sizeof(ttable));
@@ -46,7 +45,6 @@ void print_ttable(ttable tbl) {
   printf("\n");
 }
 
-/* Prints a gate network to stdout in Graphviz dot format. */
 void print_digraph(const state *st) {
   printf("digraph sbox {\n");
   assert(st->num_gates < MAX_GATES);
@@ -108,7 +106,6 @@ static bool get_c_variable_name(const state * restrict st, const gatenum gate, c
   return true;
 }
 
-/* Converts a gate network to a C function and prints it to stdout. */
 bool print_c_function(const state *st) {
   /* Generate CUDA code if LUT gates are present. */
   bool cuda = false;

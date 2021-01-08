@@ -3,7 +3,7 @@
    Helper functions for saving and loading files containing logic circuit
    representations of S-boxes created by sboxgates.
 
-   Copyright (c) 2016-2017, 2020 Marcus Dansarie
+   Copyright (c) 2016-2017, 2020-2021 Marcus Dansarie
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -51,6 +51,7 @@ const char* const gate_name[] = {
   "LUT"
 };
 
+/* The Speck round function. */
 static inline uint32_t speck_round(uint16_t pt1, uint16_t pt2, uint16_t k1) {
   pt1 = (pt1 >> 7) | (pt1 << 9);
   pt1 += pt2;
@@ -163,8 +164,6 @@ void save_state(state st) {
   fclose(fp);
 }
 
-/* Returns the SAT metric of the specified gate type. Calling this with the LUT
- * gate type will cause an assertion to fail. */
 int get_sat_metric(gate_type type) {
   switch (type) {
     case FALSE_GATE:  return 1;
