@@ -31,10 +31,13 @@ implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or
 
 * [CMake](https://github.com/Kitware/CMake) version 3.9 or later (for build)
 * [libxml2](https://github.com/GNOME/libxml2)
-* MPI
+* An MPI implementation such as MPICH(https://github.com/pmodels/mpich) or
+  [Open MPI](https://github.com/open-mpi/ompi)
 * [Graphviz](https://github.com/ellson/graphviz) (for generating visual representations)
 
 ## Build
+
+The following commands will build sboxgates on Debian-based Linux distributions, such as Ubuntu.
 
 ```
 sudo apt-get install cmake graphviz libmpich-dev libxml2-dev mpich
@@ -48,7 +51,9 @@ make
 
 This program uses MPI for parallelization and should generally be run with the mpirun utility.
 Graph generation without LUTs (i.e. without the `--lut` argument) is not parallelized and the
-program can safely be run without MPI in those cases.
+program can safely be run without MPI in those cases. The number of processes to use for the
+parallelized operations can be selected using the `-n` flag to mpirun. `man mpirun` should provide
+documentation on the options available for controlling execution and parallelization
 
 The `--help` command line argument will display a brief list of command line options. The only
 required argument is the path of an S-box file. S-box files are text files that contain an S-box
@@ -67,6 +72,12 @@ argument. Graphs that include at least one LUT are converted to CUDA functions a
 LUTs are converted to C functions. For visualization of the generated graphs, they can be converted
 to Graphviz DOT format with the `-d` argument.
 
+## Test
+
+Tests are run automatically by [Travis CI](https://travis-ci.com/dansarie/sboxgates) on each new
+commit. The tests are documented in the testing script [.travis.yml](.travis.yml). Code coverage
+reports are available from [Coveralls](https://coveralls.io/github/dansarie/sboxgates).
+
 ### Command examples
 
 Generate a logic circuit representation of the Rijndael S-box:
@@ -77,6 +88,12 @@ Generate a logic circuit representation of the Rijndael S-box:
 Generate a LUT circuit for output bit 0 of the Rijndael S-box:
 ```
 mpirun ./sboxgates --lut --single-output 0 ../sboxes/rijndael.txt
+```
+
+Generate a LUT circuit for output bit 0 of the Rijndael S-box using 8 processes for the
+parallelized search:
+```
+mpirun -n 8 ./sboxgates --lut --single-output 0 ../sboxes/rijndael.txt
 ```
 
 Visualize a generated circuit with Graphviz:
@@ -153,7 +170,17 @@ It is meant to improve the performance when the graph is used with
 The `--permute` argument can be used to permute the S-box input by XORing it with a constant value,
 so that the S-box value for input value I becomes S(I ^ V), where V is the permutation value.
 
-## License
+## Contributing
 
-This project is licensed under the GNU General Public License -- see the [LICENSE](LICENSE)
+Reports on bugs and other issues are welcome. Please don't hesitate to open a new
+[issue](https://github.com/dansarie/sboxgates/issues).
+
+Likewise, contrubutions to code or documentation in the form of
+[pull requests](https://github.com/dansarie/sboxgates/pulls) are welcomed.
+
+## License and Copyright
+
+Copyright 2017-2021 [Marcus Dansarie](https://github.com/dansarie).
+
+This project is licensed under the GNU General Public License – see the [LICENSE](LICENSE)
 file for details.
