@@ -4,17 +4,20 @@
 [![Build Status](https://travis-ci.com/dansarie/sboxgates.svg?branch=master)](https://travis-ci.com/dansarie/sboxgates)
 [![Coverage Status](https://coveralls.io/repos/github/dansarie/sboxgates/badge.svg)](https://coveralls.io/github/dansarie/sboxgates)
 
-Program for finding low gate count implementations of S-boxes.
+Program for finding low gate count implementations of S-boxes. S-boxes are often the only nonlinear
+components in modern block ciphers. Thus, low gate count implementations can be useful for
+cryptanalysis and fast implementations in hardware or software.
 
 The algorithm used is described in [Kwan, Matthew: "Reducing the Gate Count of Bitslice DES."
-IACR Cryptology ePrint Archive 2000 (2000): 51](https://ia.cr/2000/051), with improvements from the
-GitHub project [SBOXDiscovery](https://github.com/tripcode/SBOXDiscovery) added. The program
-supports searching for gates using any subset of the 16 standard two-input boolean gates.
+IACR Cryptology ePrint Archive 2000 (2000): 51](https://ia.cr/2000/051). Improvements from the
+GitHub project [SBOXDiscovery](https://github.com/tripcode/SBOXDiscovery) have been added. The
+program supports searching for gates using any subset of the 16 standard two-input boolean gates.
 Additionally, the program also supports 3-bit LUTs. The latter can be used to find efficient
 implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or on FPGAs.
 
 * [Dependencies](#dependencies)
 * [Build](#build)
+* [Test](#test)
 * [Run](#run)
   * [Command examples](#command-examples)
   * [Single output](#single-output)
@@ -22,7 +25,8 @@ implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or
   * [Selecting gates](#selecting-gates)
   * [Metrics](#metrics)
   * [Permuting S-boxes](#permuting-s-boxes)
-* [License](#license)
+* [Contributing](#contributing)
+* [License](#license-and-copyright)
 
 #### Graph representation of output bit 0 of DES S1 generated with sboxgates and Graphviz
 ![Graph representation of output bit 0 of DES S1](des_s1_bit0.svg)
@@ -46,6 +50,12 @@ cd build
 cmake ..
 make
 ```
+
+## Test
+
+Tests are run automatically by [Travis CI](https://travis-ci.com/dansarie/sboxgates) on each new
+commit. The tests are documented in the testing script [.travis.yml](.travis.yml). Code coverage
+reports are available from [Coveralls](https://coveralls.io/github/dansarie/sboxgates).
 
 ## Run
 
@@ -71,12 +81,6 @@ The program can convert the XML files to C or CUDA functions. This is enabled by
 argument. Graphs that include at least one LUT are converted to CUDA functions and graphs without
 LUTs are converted to C functions. For visualization of the generated graphs, they can be converted
 to Graphviz DOT format with the `-d` argument.
-
-## Test
-
-Tests are run automatically by [Travis CI](https://travis-ci.com/dansarie/sboxgates) on each new
-commit. The tests are documented in the testing script [.travis.yml](.travis.yml). Code coverage
-reports are available from [Coveralls](https://coveralls.io/github/dansarie/sboxgates).
 
 ### Command examples
 
