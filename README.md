@@ -26,7 +26,7 @@ implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or
   * [Metrics](#metrics)
   * [Permuting S-boxes](#permuting-s-boxes)
 * [Contributing](#contributing)
-* [License](#license-and-copyright)
+* [License and Copyright](#license-and-copyright)
 
 #### Graph representation of output bit 0 of DES S1 generated with sboxgates and Graphviz
 ![Graph representation of output bit 0 of DES S1](des_s1_bit0.svg)
