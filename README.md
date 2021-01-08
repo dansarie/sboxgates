@@ -29,7 +29,7 @@ implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or
 
 ## Dependencies
 
-* [CMake](https://github.com/Kitware/CMake) (for build)
+* [CMake](https://github.com/Kitware/CMake) version 3.9 or later (for build)
 * [libxml2](https://github.com/GNOME/libxml2)
 * MPI
 * [Graphviz](https://github.com/ellson/graphviz) (for generating visual representations)
