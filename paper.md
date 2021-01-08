@@ -20,7 +20,7 @@ bibliography: paper.bib
 
 S-boxes are often the only nonlinear components in modern block ciphers. They are commonly selected to comply with very specific criteria in order to make a cipher secure against, for example, linear and differential attacks. An $M \times N$ S-box can be thought of as a lookup table that relates an $M$-bit input value to an $N$-bit output value, or as a set of $N$ boolean functions of $M$ variables [@schneier1996]. <!-- p. 349 -->
 
-Although cipher specifications generally describe S-boxes using their lookup tables, they can also be described as boolean functions or logic gate circuits. `sboxgates`, which is presented here, finds equivalent logic gate circuits for S-boxes, given their lookup table specification. Generated circuits are output in a human-readable XML format. The software can convert the output files into C or CUDA (a programming language for Nvidia GPUs) source code. The generated circuits can also be converted to the DOT graph description language for visualization with Graphviz [@graphviz].
+Although cipher specifications generally describe S-boxes using their lookup tables, they can also be described as boolean functions or logic gate circuits. `sboxgates`, which is presented here, finds equivalent logic gate circuits for S-boxes, given their lookup table specification. Generated circuits are output in a human-readable XML format. The software can convert the output files into C or CUDA (a parallel computing platform for Nvidia GPUs) source code. The generated circuits can also be converted to the DOT graph description language for visualization with Graphviz [@graphviz].
 
 # Statement of need
 
