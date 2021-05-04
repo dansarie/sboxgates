@@ -35,7 +35,7 @@ implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or
 
 * [CMake](https://github.com/Kitware/CMake) version 3.9 or later (for build)
 * [libxml2](https://github.com/GNOME/libxml2)
-* An MPI implementation such as MPICH(https://github.com/pmodels/mpich) or
+* An MPI implementation such as [MPICH](https://github.com/pmodels/mpich) or
   [Open MPI](https://github.com/open-mpi/ompi)
 * [Graphviz](https://github.com/ellson/graphviz) (for generating visual representations)
 
