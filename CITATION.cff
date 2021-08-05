@@ -1,0 +1,18 @@
+# YAML 1.2
+---
+authors:
+  -
+    family-names: Dansarie
+    given-names: Marcus
+    orcid: "https://orcid.org/0000-0001-9246-0263"
+cff-version: "1.1.0"
+date-published: 2021-06-16
+doi: "10.21105/joss.02946"
+issue: 62
+journal: "Journal of Open Source Software"
+license: "CC-BY-4.0"
+message: "If you use this software, please cite the corresponding article in the Journal of Open Source Software (JOSS)."
+start: 2946
+title: "sboxgates: A program for finding low gate count implementations of S-boxes"
+volume: 6
+...

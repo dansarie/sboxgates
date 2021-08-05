@@ -1,4 +1,5 @@
 # sboxgates
+[![DOI](https://joss.theoj.org/papers/10.21105/joss.02946/status.svg)](https://doi.org/10.21105/joss.02946)
 [![DOI](https://zenodo.org/badge/79294181.svg)](https://zenodo.org/badge/latestdoi/79294181)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Build Status](https://travis-ci.com/dansarie/sboxgates.svg?branch=master)](https://travis-ci.com/dansarie/sboxgates)
