@@ -27,6 +27,7 @@ implementations for use on Nvidia GPUs that support the LOP3.LUT instruction, or
   * [Metrics](#metrics)
   * [Permuting S-boxes](#permuting-s-boxes)
 * [Contributing](#contributing)
+* [Citing](#citing)
 * [License and Copyright](#license-and-copyright)
 
 #### Graph representation of output bit 0 of DES S1 generated with sboxgates and Graphviz
@@ -182,6 +183,27 @@ Reports on bugs and other issues are welcome. Please don't hesitate to open a ne
 
 Likewise, contrubutions to code or documentation in the form of
 [pull requests](https://github.com/dansarie/sboxgates/pulls) are welcomed.
+
+## Citing
+
+If you use sboxgates in a report or scientific publication, please cite the corresponding article in the Journal of Open Source Software:
+
+Dansarie, M., (2021). sboxgates: A program for finding low gate count implementations of S-boxes. Journal of Open Source Software, 6(62), 2946, [https://doi.org/10.21105/joss.02946](https://doi.org/10.21105/joss.02946)
+
+```
+@article{Dansarie2021,
+  doi = {10.21105/joss.02946},
+  url = {https://doi.org/10.21105/joss.02946},
+  year = {2021},
+  publisher = {The Open Journal},
+  volume = {6},
+  number = {62},
+  pages = {2946},
+  author = {Marcus Dansarie},
+  title = {sboxgates: A program for finding low gate count implementations of S-boxes},
+  journal = {Journal of Open Source Software}
+}
+```
 
 ## License and Copyright
 
