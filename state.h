@@ -100,6 +100,20 @@ void save_state(state st);
    gate type will cause an assertion to fail. */
 int get_sat_metric(gate_type type);
 
+/* Returns the number of input gates in the state.
+   st - pointer to a state. */
+int get_num_inputs(const state *st);
+
+/* Calculates the truth table of a LUT given its function and three input truth tables. */
+ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
+    const ttable in3);
+
+/* Generates a target truth table for the search.
+   bit  - which bit of the input/sbox to generate the target truth table for.
+   sbox - If true, a target truth table for the given bit of g_sbox_enc is generated.
+          If false, the truth table of the given input bit is generated. */
+ttable generate_target(uint8_t bit, bool sbox);
+
 /* Loads a saved state from an XML file. Returns true if successful and false otherwise.
    name  - the file name to load the file from.
    state - a pointer to an allocted state struct that should be updated with the loaded state. */

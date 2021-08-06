@@ -189,6 +189,65 @@ int get_sat_metric(gate_type type) {
   }
 }
 
+int get_num_inputs(const state *st) {
+  int inputs = 0;
+  for (int i = 0; st->gates[i].type == IN && i < st->num_gates; i++) {
+    inputs += 1;
+  }
+  return inputs;
+}
+
+/* Calculates the truth table of a LUT given its function and three input truth tables. */
+ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
+    const ttable in3) {
+  ttable ret = {0};
+  if (function & 1) {
+    ret |= ~in1 & ~in2 & ~in3;
+  }
+  if (function & 2) {
+    ret |= ~in1 & ~in2 & in3;
+  }
+  if (function & 4) {
+    ret |= ~in1 & in2 & ~in3;
+  }
+  if (function & 8) {
+    ret |= ~in1 & in2 & in3;
+  }
+  if (function & 16) {
+    ret |= in1 & ~in2 & ~in3;
+  }
+  if (function & 32) {
+    ret |= in1 & ~in2 & in3;
+  }
+  if (function & 64) {
+    ret |= in1 & in2 & ~in3;
+  }
+  if (function & 128) {
+    ret |= in1 & in2 & in3;
+  }
+  return ret;
+}
+
+ttable generate_target(uint8_t bit, bool sbox) {
+  assert(bit < 8);
+  uint64_t vec[] = {0, 0, 0, 0};
+  uint64_t *var = &vec[0];
+  for (uint16_t i = 0; i < 256; i++) {
+    if (i == 64) {
+      var = &vec[1];
+    } else if (i == 128) {
+      var = &vec[2];
+    } else if (i == 192) {
+      var = &vec[3];
+    }
+    *var >>= 1;
+    *var |= (uint64_t)(((sbox ? g_sbox_enc[i] : i) >> bit) & 1) << 63;
+  }
+  ttable t;
+  memcpy(&t, &vec, sizeof(ttable));
+  return t;
+}
+
 #define LOAD_STATE_RETURN_ON_ERROR(X, Y)\
   if (X) {\
     fprintf(stderr, "Error when parsing XML document. (state.c:%d)\n", __LINE__);\

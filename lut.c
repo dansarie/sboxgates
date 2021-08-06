@@ -65,37 +65,6 @@ bool check_n_lut_possible(const int num, const ttable target, const ttable mask,
   return ttable_equals_mask(target, match, mask);
 }
 
-/* Calculates the truth table of a LUT given its function and three input truth tables. */
-ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
-    const ttable in3) {
-  ttable ret = {0};
-  if (function & 1) {
-    ret |= ~in1 & ~in2 & ~in3;
-  }
-  if (function & 2) {
-    ret |= ~in1 & ~in2 & in3;
-  }
-  if (function & 4) {
-    ret |= ~in1 & in2 & ~in3;
-  }
-  if (function & 8) {
-    ret |= ~in1 & in2 & in3;
-  }
-  if (function & 16) {
-    ret |= in1 & ~in2 & ~in3;
-  }
-  if (function & 32) {
-    ret |= in1 & ~in2 & in3;
-  }
-  if (function & 64) {
-    ret |= in1 & in2 & ~in3;
-  }
-  if (function & 128) {
-    ret |= in1 & in2 & in3;
-  }
-  return ret;
-}
-
 /* Generates all possible truth tables for a LUT with the given three input truth tables. Used for
    caching in the search functions. */
 void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3, ttable *out) {

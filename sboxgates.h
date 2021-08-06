@@ -18,11 +18,16 @@
 #ifndef __SBOXGATES_H__
 #define __SBOXGATES_H__
 
+#include <inttypes.h>
+#ifndef NO_MPI_HEADER
 #include <mpi.h>
+#endif /* NO_MPI_HEADER */
 #include "boolfunc.h"
 #include "state.h"
 
 #define MAX_NAME_LEN (1000)
+
+uint8_t g_sbox_enc[256];      /* Target S-box. */
 
 /* Holds all options set by the user. */
 typedef struct {
@@ -54,7 +59,9 @@ typedef struct {
   int verbosity;    /* Current verbosity level. */
 } mpi_work;
 
+#ifndef NO_MPI_HEADER
 extern MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. */
+#endif /* NO_MPI_HEADER */
 
 /* Adds a three input LUT gate to the state st. Returns the gate number of the added LUT, or
    NO_GATE.
@@ -85,18 +92,8 @@ bool ttable_zero(const ttable tt);
    mask - a mask. */
 bool ttable_equals_mask(const ttable in1, const ttable in2, const ttable mask);
 
-/* Returns the number of input gates in the state.
-   st - pointer to a state. */
-int get_num_inputs(const state *st);
-
 /* Returns a pseudorandom 64 bit string. Uses the xorshift1024 algorithm, initialized by
    /dev/urandom. Used in various places to randomize the search process. */
 uint64_t xorshift1024();
-
-/* Generates a target truth table for the search.
-   bit  - which bit of the input/sbox to generate the target truth table for.
-   sbox - If true, a target truth table for the given bit of g_sbox_enc is generated.
-          If false, the truth table of the given input bit is generated. */
-ttable generate_target(uint8_t bit, bool sbox);
 
 #endif /* __SBOXGATES_H__ */

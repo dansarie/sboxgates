@@ -28,10 +28,6 @@
 bool check_n_lut_possible(const int num, const ttable target, const ttable mask,
     const ttable *tables);
 
-/* Calculates the truth table of a LUT given its function and three input truth tables. */
-ttable generate_lut_ttable(const uint8_t function, const ttable in1, const ttable in2,
-    const ttable in3);
-
 /* Generates all possible truth tables for a LUT with the given three input truth tables. Used for
    caching in the search functions. */
 void generate_lut_ttables(const ttable in1, const ttable in2, const ttable in3, ttable *out);

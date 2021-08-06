@@ -35,7 +35,6 @@
 #include "sboxgates.h"
 #include "state.h"
 
-uint8_t g_sbox_enc[256];      /* Target S-box. */
 ttable g_target[8];           /* Truth tables for the output bits of the sbox. */
 MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. Defined in sboxgates.h. */
 
@@ -224,14 +223,6 @@ static gatenum add_boolfunc_3(state * restrict st, const boolfunc * restrict fun
     return add_not_gate(st, add_gate(st, fun->fun2, out1, gid3, opt), opt);
   }
   return add_gate(st, fun->fun2, out1, gid3, opt);
-}
-
-int get_num_inputs(const state *st) {
-  int inputs = 0;
-  for (int i = 0; st->gates[i].type == IN && i < st->num_gates; i++) {
-    inputs += 1;
-  }
-  return inputs;
 }
 
 /* Returns the number of outputs in the current target S-box. */
@@ -634,26 +625,6 @@ static void mpi_worker() {
       search_7lut(work.st, work.target, work.mask, work.inbits, res, work.verbosity);
     }
   }
-}
-
-ttable generate_target(uint8_t bit, bool sbox) {
-  assert(bit < 8);
-  uint64_t vec[] = {0, 0, 0, 0};
-  uint64_t *var = &vec[0];
-  for (uint16_t i = 0; i < 256; i++) {
-    if (i == 64) {
-      var = &vec[1];
-    } else if (i == 128) {
-      var = &vec[2];
-    } else if (i == 192) {
-      var = &vec[3];
-    }
-    *var >>= 1;
-    *var |= (uint64_t)(((sbox ? g_sbox_enc[i] : i) >> bit) & 1) << 63;
-  }
-  ttable t;
-  memcpy(&t, &vec, sizeof(ttable));
-  return t;
 }
 
 static ttable generate_mask(int num_inputs) {
