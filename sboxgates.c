@@ -194,10 +194,11 @@ static gatenum add_boolfunc_2(state * restrict st, const boolfunc * restrict fun
   if (fun->not_b) {
     gid2 = add_not_gate(st, gid2, opt);
   }
+  gatenum gid = add_gate(st, fun->fun1, gid1, gid2, opt);
   if (fun->not_out) {
-    return add_not_gate(st, add_gate(st, fun->fun, gid1, gid2, opt), opt);
+    gid = add_not_gate(st, gid, opt);
   }
-  return add_gate(st, fun->fun, gid1, gid2, opt);
+  return gid;
 }
 
 static gatenum add_boolfunc_3(state * restrict st, const boolfunc * restrict fun, gatenum gid1,
