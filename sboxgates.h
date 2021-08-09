@@ -22,10 +22,26 @@
 #ifndef NO_MPI_HEADER
 #include <mpi.h>
 #endif /* NO_MPI_HEADER */
+#include <stdlib.h>
 #include "boolfunc.h"
 #include "state.h"
 
 #define MAX_NAME_LEN (1000)
+
+#define ASSERT_AND_RETURN(R, T, S, M) \
+  { \
+    gatenum aar_ret = R; \
+    ttable aar_target = T; \
+    state *aar_st = S; \
+    ttable aar_mask = M; \
+    if (aar_ret == NO_GATE || ttable_equals_mask(aar_target, (aar_st)->gates[aar_ret].table, \
+         aar_mask)) { \
+      return aar_ret; \
+    } else { \
+      fprintf(stderr, "Return assertion in %s failed: %s:%d.\n", __func__, __FILE__, __LINE__); \
+      abort(); \
+    } \
+  }
 
 uint8_t g_sbox_enc[256];      /* Target S-box. */
 

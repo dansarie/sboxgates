@@ -24,7 +24,6 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -275,15 +274,6 @@ bool check_num_gates_possible(const state *st, int add, int add_sat, const optio
   return true;
 }
 
-#define ASSERT_AND_RETURN(R) \
-  gatenum ret = R; \
-  if (ret == NO_GATE || ttable_equals_mask(target, st->gates[ret].table, mask)) { \
-    return ret; \
-  } else { \
-    fprintf(stderr, "Return assertion in %s failed: %s:%d.\n", __func__, __FILE__, __LINE__); \
-    raise(SIGABRT); \
-  }
-
 /* Recursively builds the gate network. The numbered comments are references to Matthew Kwan's
    paper. */
 static gatenum create_circuit(state *st, const ttable target, const ttable mask,
@@ -310,7 +300,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
   for (int i = 0; i < st->num_gates; i++) {
     if (ttable_equals_mask(target, st->gates[gate_order[i]].table, mask)) {
-      ASSERT_AND_RETURN(gate_order[i]);
+      ASSERT_AND_RETURN(gate_order[i], target, st, mask);
     }
   }
 
@@ -323,7 +313,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
 
   for (int i = 0; i < st->num_gates; i++) {
     if (ttable_equals_mask(target, ~st->gates[gate_order[i]].table, mask)) {
-      ASSERT_AND_RETURN(add_not_gate(st, gate_order[i], opt));
+      ASSERT_AND_RETURN(add_not_gate(st, gate_order[i], opt), target, st, mask);
     }
   }
 
@@ -343,11 +333,13 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
       const ttable tk = st->gates[gk].table;
       for (int m = 0; opt->avail_gates[m].num_inputs != 0; m++) {
         if (ttable_equals(mtarget, generate_ttable_2(opt->avail_gates[m].fun, ti, tk))) {
-          ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_gates[m], gi, gk, opt));
+          ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_gates[m], gi, gk, opt), target, st,
+              mask);
         }
         if (!opt->avail_gates[m].ab_commutative) {
           if (ttable_equals(mtarget, generate_ttable_2(opt->avail_gates[m].fun, tk, ti))) {
-            ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_gates[m], gk, gi, opt));
+            ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_gates[m], gk, gi, opt), target, st,
+                mask);
           }
         }
       }
@@ -357,7 +349,7 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
   if (opt->lut_graph) {
     gatenum ret = lut_search(st, target, mask, inbits, gate_order, opt);
     if (ret != NO_GATE) {
-      ASSERT_AND_RETURN(ret);
+      ASSERT_AND_RETURN(ret, target, st, mask);
     }
   } else {
     /* 4. Look at all combinations of two or three gates in the circuit. If they can be combined
@@ -377,11 +369,13 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
         ttable tk = st->gates[gk].table;
         for (int m = 0; opt->avail_not[m].num_inputs != 0; m++) {
           if (ttable_equals(mtarget, generate_ttable_2(opt->avail_not[m].fun, ti, tk))) {
-            ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_not[m], gi, gk, opt));
+            ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_not[m], gi, gk, opt), target, st,
+                mask);
           }
           if (!opt->avail_not[m].ab_commutative) {
             if (ttable_equals(mtarget, generate_ttable_2(opt->avail_not[m].fun, tk, ti))) {
-              ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_not[m], gk, gi, opt));
+              ASSERT_AND_RETURN(add_boolfunc_2(st, &opt->avail_not[m], gk, gi, opt), target, st,
+                  mask);
             }
           }
         }
@@ -408,24 +402,28 @@ static gatenum create_circuit(state *st, const ttable target, const ttable mask,
           }
           for (int p = 0; opt->avail_3[p].num_inputs != 0; p++) {
             if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], ti, tk, tm), mask)) {
-              ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gi, gk, gm, opt));
+              ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gi, gk, gm, opt), target, st,
+                  mask);
             }
             if (!opt->avail_3[m].ab_commutative) {
               if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], tk, ti, tm),
                   mask)) {
-                ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gk, gi, gm, opt));
+                ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gk, gi, gm, opt), target, st,
+                    mask);
               }
             }
             if (!opt->avail_3[m].ac_commutative) {
               if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], tm, tk, ti),
                   mask)) {
-                ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gm, gk, gi, opt));
+                ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gm, gk, gi, opt), target, st,
+                    mask);
               }
             }
             if (!opt->avail_3[m].bc_commutative) {
               if (ttable_equals_mask(target, generate_ttable_3(opt->avail_3[p], ti, tm, tk),
                   mask)) {
-                ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gi, gm, gk, opt));
+                ASSERT_AND_RETURN(add_boolfunc_3(st, &opt->avail_3[p], gi, gm, gk, opt), target, st,
+                    mask);
               }
             }
           }

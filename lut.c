@@ -517,7 +517,7 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
         }
         ttable nt = generate_lut_ttable(func, ta, tb, tc);
         assert(ttable_equals_mask(target, nt, mask));
-        return add_lut(st, func, nt, gi, gk, gm);
+        ASSERT_AND_RETURN(add_lut(st, func, nt, gi, gk, gm), target, st, mask);
       }
     }
   }
@@ -575,8 +575,8 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
     ttable t_inner = generate_lut_ttable(func_inner, t_outer, td, te);
     assert(ttable_equals_mask(target, t_inner, mask));
 
-    return add_lut(st, func_inner, t_inner,
-        add_lut(st, func_outer, t_outer, a, b, c), d, e);
+    ASSERT_AND_RETURN(add_lut(st, func_inner, t_inner,
+        add_lut(st, func_outer, t_outer, a, b, c), d, e), target, st, mask);
   }
 
   if (!check_num_gates_possible(st, 3, 0, opt)) {
@@ -619,9 +619,9 @@ gatenum lut_search(state *st, const ttable target, const ttable mask, const int8
     ttable t_middle = generate_lut_ttable(func_middle, td, te, tf);
     ttable t_inner = generate_lut_ttable(func_inner, t_outer, t_middle, tg);
     assert(ttable_equals_mask(target, t_inner, mask));
-    return add_lut(st, func_inner, t_inner,
+    ASSERT_AND_RETURN(add_lut(st, func_inner, t_inner,
         add_lut(st, func_outer, t_outer, a, b, c),
-        add_lut(st, func_middle, t_middle, d, e, f), g);
+        add_lut(st, func_middle, t_middle, d, e, f), g), target, st, mask);
   }
 
   if (opt->verbosity >= 2) {
