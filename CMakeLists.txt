@@ -34,4 +34,10 @@ if (ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage")
 endif (ENABLE_COVERAGE AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
 
+include(CheckIPOSupported)
+check_ipo_supported(RESULT result)
+if(result)
+  set_target_properties(sboxgates PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 install(TARGETS sboxgates DESTINATION bin)
