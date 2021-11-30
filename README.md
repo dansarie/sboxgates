@@ -2,7 +2,7 @@
 [![DOI](https://joss.theoj.org/papers/10.21105/joss.02946/status.svg)](https://doi.org/10.21105/joss.02946)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.891020.svg)](https://doi.org/10.5281/zenodo.891020)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Build Status](https://travis-ci.com/dansarie/sboxgates.svg?branch=master)](https://travis-ci.com/dansarie/sboxgates)
+[![Build Status](https://travis-ci.com/dansarie/sboxgates.svg?branch=master)](https://travis-ci.com/github/dansarie/sboxgates)
 [![Coverage Status](https://coveralls.io/repos/github/dansarie/sboxgates/badge.svg)](https://coveralls.io/github/dansarie/sboxgates)
 
 Program for finding low gate count implementations of S-boxes. S-boxes are often the only nonlinear
