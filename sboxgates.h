@@ -43,7 +43,7 @@
     } \
   }
 
-uint8_t g_sbox_enc[256];      /* Target S-box. */
+extern uint8_t g_sbox_enc[256];  /* Target S-box. */
 
 /* Holds all options set by the user. */
 typedef struct {

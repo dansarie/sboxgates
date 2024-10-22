@@ -35,6 +35,8 @@
 #include "sboxgates.h"
 #include "state.h"
 
+uint8_t g_sbox_enc[256] = {0};        /* Defined in sboxgates.h. */
+
 ttable g_target[8];           /* Truth tables for the output bits of the sbox. */
 MPI_Datatype g_mpi_work_type; /* MPI type for mpi_work struct. Defined in sboxgates.h. */
 
