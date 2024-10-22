@@ -24,6 +24,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "lut.h"
 #include "sboxgates.h"
@@ -298,7 +299,7 @@ bool load_state(const char *name, state *return_state) {
     }
     xmlFree(typestr);
     if (type > LUT) {
-      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+      LOAD_STATE_RETURN_ON_ERROR(true, doc);
     }
     typestr = NULL;
 
@@ -326,7 +327,7 @@ bool load_state(const char *name, state *return_state) {
       int gatenum = strtoul(gatestr, &endptr, 10);
       if (*endptr != '\0') {
         xmlFree(gatestr);
-        LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+        LOAD_STATE_RETURN_ON_ERROR(true, doc);
       }
       xmlFree(gatestr);
       gatestr = NULL;
@@ -351,7 +352,7 @@ bool load_state(const char *name, state *return_state) {
       table = generate_lut_ttable(func, st.gates[inputs[0]].table, st.gates[inputs[1]].table,
           st.gates[inputs[2]].table);
     } else {
-      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+      LOAD_STATE_RETURN_ON_ERROR(true, doc);
     }
 
     st.gates[st.num_gates].table = table;
@@ -373,7 +374,7 @@ bool load_state(const char *name, state *return_state) {
     int bit = strtoul(bitstr, &endptr, 10);
     if (*endptr != '\0') {
       xmlFree(bitstr);
-      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+      LOAD_STATE_RETURN_ON_ERROR(true, doc);
     }
     xmlFree(bitstr);
     bitstr = NULL;
@@ -384,7 +385,7 @@ bool load_state(const char *name, state *return_state) {
     int gate = strtoul(gatestr, &endptr, 10);
     if (*endptr != '\0') {
       xmlFree(gatestr);
-      LOAD_STATE_RETURN_ON_ERROR(TRUE, doc);
+      LOAD_STATE_RETURN_ON_ERROR(true, doc);
     }
     xmlFree(gatestr);
     gatestr = NULL;
